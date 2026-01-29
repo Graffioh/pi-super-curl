@@ -896,18 +896,35 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					}
 				}
 
-				// Set value at a JSON path (e.g., "generation_params.positive_prompt")
+				// Set value at a JSON path (e.g., "generation_params.positive_prompt" or "messages[0].content")
 				function setAtPath(obj: Record<string, unknown>, pathStr: string, value: unknown): void {
-					const parts = pathStr.split(".");
-					let current = obj;
-					for (let i = 0; i < parts.length - 1; i++) {
-						const part = parts[i];
-						if (!(part in current) || typeof current[part] !== "object") {
-							current[part] = {};
+					// Parse path into segments, handling both dot notation and array brackets
+					const segments: (string | number)[] = [];
+					const regex = /([^.\[\]]+)|\[(\d+)\]/g;
+					let match;
+					while ((match = regex.exec(pathStr)) !== null) {
+						if (match[1] !== undefined) {
+							segments.push(match[1]); // property name
+						} else if (match[2] !== undefined) {
+							segments.push(parseInt(match[2], 10)); // array index
 						}
-						current = current[part] as Record<string, unknown>;
 					}
-					current[parts[parts.length - 1]] = value;
+					
+					let current: unknown = obj;
+					for (let i = 0; i < segments.length - 1; i++) {
+						const seg = segments[i];
+						const nextSeg = segments[i + 1];
+						const currentObj = current as Record<string, unknown>;
+						
+						if (!(seg in currentObj) || typeof currentObj[seg as string] !== "object") {
+							// Create array or object based on next segment type
+							currentObj[seg as string] = typeof nextSeg === "number" ? [] : {};
+						}
+						current = currentObj[seg as string];
+					}
+					
+					const lastSeg = segments[segments.length - 1];
+					(current as Record<string, unknown>)[lastSeg as string] = value;
 				}
 
 				function buildFinalBody(): string {
@@ -1969,17 +1986,35 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 					}
 				}
 
+				// Set value at a JSON path (e.g., "generation_params.positive_prompt" or "messages[0].content")
 				function setAtPath(obj: Record<string, unknown>, pathStr: string, value: unknown): void {
-					const parts = pathStr.split(".");
-					let current = obj;
-					for (let i = 0; i < parts.length - 1; i++) {
-						const part = parts[i];
-						if (!(part in current) || typeof current[part] !== "object") {
-							current[part] = {};
+					// Parse path into segments, handling both dot notation and array brackets
+					const segments: (string | number)[] = [];
+					const regex = /([^.\[\]]+)|\[(\d+)\]/g;
+					let match;
+					while ((match = regex.exec(pathStr)) !== null) {
+						if (match[1] !== undefined) {
+							segments.push(match[1]); // property name
+						} else if (match[2] !== undefined) {
+							segments.push(parseInt(match[2], 10)); // array index
 						}
-						current = current[part] as Record<string, unknown>;
 					}
-					current[parts[parts.length - 1]] = value;
+					
+					let current: unknown = obj;
+					for (let i = 0; i < segments.length - 1; i++) {
+						const seg = segments[i];
+						const nextSeg = segments[i + 1];
+						const currentObj = current as Record<string, unknown>;
+						
+						if (!(seg in currentObj) || typeof currentObj[seg as string] !== "object") {
+							// Create array or object based on next segment type
+							currentObj[seg as string] = typeof nextSeg === "number" ? [] : {};
+						}
+						current = currentObj[seg as string];
+					}
+					
+					const lastSeg = segments[segments.length - 1];
+					(current as Record<string, unknown>)[lastSeg as string] = value;
 				}
 
 				function buildFinalBody(): string {
@@ -2199,12 +2234,17 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 							
 							const editor = getFieldEditor(fieldConfig.name);
 							const editorLines = editor.render(innerWidth - 2);
+							const editorText = editor.getText().trim();
+							const textLineCount = editorText ? editorText.split("\n").length : 0;
 							const maxLines = fieldActive ? 5 : 2;
 							for (const line of editorLines.slice(0, maxLines)) {
 								lines.push(row((fieldActive ? "  " : theme.fg("muted", "  ")) + line));
 							}
-							if (editorLines.length > maxLines) {
-								lines.push(row(theme.fg("dim", `    ... ${editorLines.length - maxLines} more`)));
+							// Only show "more" if there's actual text content that's truncated
+							if (textLineCount > maxLines) {
+								lines.push(row(theme.fg("dim", `    ... ${textLineCount - maxLines} more`)));
+								// Add bottom border when content is truncated
+								lines.push(row("  " + theme.fg("accent", "─".repeat(innerWidth - 4))));
 							}
 							lines.push(divider());
 						}
