@@ -1,8 +1,10 @@
-# Pi Super Curl
+# pi-super-curl
 
-A [Pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl`.
+A [pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl`.
 
-<!-- Video demo will go here -->
+https://github.com/user-attachments/assets/612542b1-5fd0-4cd5-a02e-9384cab9cc98
+
+Still work in progress.
 
 ## Why
 
@@ -12,7 +14,7 @@ API testing during development is repetitive. You're constantly:
 - Retyping the same endpoints
 - Losing context switching between Postman and your terminal
 
-Pi Super Curl gives you a Postman-like request builder right in your terminal:
+pi super curl gives you a Postman-like request builder right in your terminal:
 
 ```
 /scurl
