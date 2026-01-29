@@ -1305,19 +1305,358 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				return;
 			}
 
-			// Build the request message for the LLM
-			let message = `Use send_request to ${result.method} ${result.url}`;
-			if (result.body) {
-				message += ` with body ${result.body}`;
-			}
+			// Parse headers from string format "Name: Value\nName2: Value2"
+			const extraHeaders: Record<string, string> = {};
 			if (result.headers) {
-				message += ` with headers: ${result.headers}`;
+				for (const line of result.headers.split("\n")) {
+					const colonIdx = line.indexOf(":");
+					if (colonIdx > 0) {
+						const key = line.slice(0, colonIdx).trim();
+						const value = line.slice(colonIdx + 1).trim();
+						if (key) extraHeaders[key] = value;
+					}
+				}
 			}
 
-			// Send as user message to trigger the agent
+			// Pre-resolve all templates so the skill doesn't need to handle them
+			config = loadConfig(ctx.cwd);
+			
+			// Resolve URL (handle @endpoint and baseUrl)
+			let resolvedUrl = result.url;
+			let endpoint: EndpointConfig | undefined;
+			
+			if (resolvedUrl.startsWith("@")) {
+				const endpointName = resolvedUrl.slice(1);
+				endpoint = config.endpoints?.find((e) => e.name === endpointName);
+				if (endpoint) {
+					resolvedUrl = endpoint.url;
+				}
+			}
+			
+			if (!resolvedUrl.startsWith("http://") && !resolvedUrl.startsWith("https://")) {
+				if (config.baseUrl) {
+					const resolvedBaseUrl = resolveTemplates(config.baseUrl);
+					resolvedUrl = `${resolvedBaseUrl.replace(/\/$/, "")}/${resolvedUrl.replace(/^\//, "")}`;
+				}
+			}
+			resolvedUrl = resolveTemplates(resolvedUrl);
+			
+			// Resolve body (merge with endpoint defaults and resolve templates)
+			let resolvedBody = result.body || "";
+			if (endpoint?.defaultBody) {
+				try {
+					const bodyObj = resolvedBody ? JSON.parse(resolvedBody) : {};
+					const merged = { ...endpoint.defaultBody, ...bodyObj };
+					const resolved = resolveTemplatesInObject(merged);
+					resolvedBody = JSON.stringify(resolved);
+				} catch {
+					resolvedBody = resolveTemplates(resolvedBody);
+				}
+			} else if (resolvedBody) {
+				try {
+					const parsed = JSON.parse(resolvedBody);
+					const resolved = resolveTemplatesInObject(parsed);
+					resolvedBody = JSON.stringify(resolved);
+				} catch {
+					resolvedBody = resolveTemplates(resolvedBody);
+				}
+			}
+			
+			// Resolve headers
+			const allHeaders: Record<string, string> = {
+				...(config.headers || {}),
+				...(endpoint?.headers || {}),
+				...extraHeaders,
+			};
+			const resolvedHeaders: Record<string, string> = {};
+			for (const [key, value] of Object.entries(allHeaders)) {
+				resolvedHeaders[key] = resolveTemplates(value);
+			}
+			
+			// Add auth header
+			const auth = endpoint?.auth || config.auth;
+			if (auth && auth.type !== "none") {
+				Object.assign(resolvedHeaders, buildAuthHeader(auth));
+			}
+			
+			// Format headers for message
+			const headersStr = Object.entries(resolvedHeaders)
+				.map(([k, v]) => `${k}: ${v}`)
+				.join("\n");
+
+			// Build message for LLM with pre-resolved values
+			const method = endpoint?.method || result.method;
+			let message = `Use the send-request skill to ${method} ${resolvedUrl}`;
+			if (resolvedBody) {
+				message += ` with body:\n${resolvedBody}`;
+			}
+			if (headersStr) {
+				message += `\n\nWith headers:\n${headersStr}`;
+			}
+
+			// Send to LLM
 			pi.sendUserMessage(message);
 		},
 	});
+
+	// Core request execution logic (shared by /scurl and send_request tool)
+	interface ExecuteRequestParams {
+		method: string;
+		url: string;
+		body?: string;
+		headers?: Record<string, string>;
+		save?: boolean;
+		cwd: string;
+		onUpdate?: (update: { content: Array<{ type: string; text: string }> }) => void;
+		signal?: AbortSignal;
+	}
+
+	interface ExecuteRequestResult {
+		content: Array<{ type: string; text: string }>;
+		details: Record<string, unknown>;
+		isError?: boolean;
+	}
+
+	async function executeRequest(params: ExecuteRequestParams): Promise<ExecuteRequestResult> {
+		const { method = "GET", headers: extraHeaders = {}, body, save = false, cwd, onUpdate, signal } = params;
+		let url = params.url;
+		const startTime = Date.now();
+
+		config = loadConfig(cwd);
+
+		// Handle named endpoints
+		let endpoint: EndpointConfig | undefined;
+		if (url.startsWith("@")) {
+			const endpointName = url.slice(1);
+			endpoint = config.endpoints?.find((e) => e.name === endpointName);
+			if (!endpoint) {
+				const available = config.endpoints?.map((e) => e.name).join(", ") || "none";
+				return {
+					content: [{ type: "text", text: `Endpoint "@${endpointName}" not found. Available: ${available}` }],
+					details: { error: true },
+					isError: true,
+				};
+			}
+			url = endpoint.url;
+		}
+
+		// Build full URL (resolve templates in baseUrl first)
+		if (!url.startsWith("http://") && !url.startsWith("https://")) {
+			if (config.baseUrl) {
+				const resolvedBaseUrl = resolveTemplates(config.baseUrl);
+				url = `${resolvedBaseUrl.replace(/\/$/, "")}/${url.replace(/^\//, "")}`;
+			} else {
+				return {
+					content: [{ type: "text", text: "URL must be absolute or configure baseUrl in .super-curl.json" }],
+					details: { error: true },
+					isError: true,
+				};
+			}
+		}
+
+		// Build headers and resolve templates
+		const rawHeaders: Record<string, string> = {
+			...(config.headers || {}),
+			...(endpoint?.headers || {}),
+			...extraHeaders,
+		};
+		const finalHeaders: Record<string, string> = {};
+		for (const [key, value] of Object.entries(rawHeaders)) {
+			finalHeaders[key] = resolveTemplates(value);
+		}
+
+		// Add auth
+		const auth = endpoint?.auth || config.auth;
+		if (auth && auth.type !== "none") {
+			Object.assign(finalHeaders, buildAuthHeader(auth));
+		}
+
+		// Add content-type for body
+		if (body && !finalHeaders["Content-Type"]) {
+			finalHeaders["Content-Type"] = "application/json";
+		}
+
+		// Merge body with endpoint defaults and resolve templates
+		let finalBody = body;
+		if (endpoint?.defaultBody && body) {
+			try {
+				const parsedBody = JSON.parse(body);
+				const merged = { ...endpoint.defaultBody, ...parsedBody };
+				// Resolve templates in the merged body
+				const resolved = resolveTemplatesInObject(merged);
+				finalBody = JSON.stringify(resolved);
+			} catch {
+				// Use as-is but still resolve templates
+				finalBody = resolveTemplates(body);
+			}
+		} else if (endpoint?.defaultBody && !body) {
+			const resolved = resolveTemplatesInObject(endpoint.defaultBody);
+			finalBody = JSON.stringify(resolved);
+		} else if (body) {
+			// Resolve templates in the body
+			try {
+				const parsed = JSON.parse(body);
+				const resolved = resolveTemplatesInObject(parsed);
+				finalBody = JSON.stringify(resolved);
+			} catch {
+				finalBody = resolveTemplates(body);
+			}
+		}
+
+		// Resolve templates in URL
+		url = resolveTemplates(url);
+
+		const effectiveMethod = endpoint?.method || method;
+
+		onUpdate?.({
+			content: [{ type: "text", text: `${effectiveMethod} ${url}...` }],
+		});
+
+		try {
+			const controller = new AbortController();
+			const timeoutId = setTimeout(() => controller.abort(), config.timeout || 30000);
+			signal?.addEventListener("abort", () => controller.abort());
+
+			const response = await fetch(url, {
+				method: effectiveMethod,
+				headers: finalHeaders,
+				body: finalBody,
+				signal: controller.signal,
+			});
+
+			clearTimeout(timeoutId);
+
+			const contentType = response.headers.get("content-type");
+			const duration = Date.now() - startTime;
+			const shouldStream = endpoint?.stream || contentType?.includes("text/event-stream");
+
+			let responseText = await response.text();
+			let sseResult: SSEParseResult | null = null;
+
+			// Parse SSE if streaming endpoint
+			if (shouldStream) {
+				sseResult = parseSSEResponse(responseText);
+			}
+
+			// Format JSON (for non-streaming responses)
+			if (!shouldStream && contentType?.includes("application/json")) {
+				try {
+					responseText = JSON.stringify(JSON.parse(responseText), null, 2);
+				} catch {
+					// Keep as-is
+				}
+			}
+
+			// Save if requested
+			let outputFile: string | undefined;
+			if (save) {
+				outputFile = saveOutput(cwd, responseText, contentType, url);
+			}
+
+			// Build result text
+			const statusEmoji = response.ok ? "✓" : "✗";
+			let resultText = `${statusEmoji} ${response.status} ${response.statusText} (${duration}ms)\n`;
+
+			// For streaming responses, show parsed summary
+			if (sseResult) {
+				if (sseResult.outputs.length > 0) {
+					resultText += `\n[OK] Generated ${sseResult.outputs.length} output(s):\n`;
+					for (const out of sseResult.outputs) {
+						const gcsUrl = `gs://${out.bucket_name}/${out.object_key}`;
+						resultText += `  • ${out.file_type} (${out.width}x${out.height})\n`;
+						resultText += `    ID: ${out.inference_request_id}\n`;
+						resultText += `    GCS: ${gcsUrl}\n`;
+					}
+				}
+
+				if (sseResult.responseText) {
+					resultText += `\n[>] Agent response:\n${sseResult.responseText}\n`;
+				}
+
+				if (sseResult.errors.length > 0) {
+					resultText += `\n[ERR] Errors:\n`;
+					for (const err of sseResult.errors) {
+						resultText += `  • ${err}\n`;
+					}
+				}
+
+				// Log generation to output directory
+				if (config.outputDir) {
+					try {
+						const bodyObj = finalBody ? JSON.parse(finalBody) : {};
+						const logPaths = logGeneration({
+							cwd,
+							prompt: bodyObj?.generation_params?.positive_prompt || "",
+							restructuredPrompt: sseResult.restructuredPrompt,
+							chatId: bodyObj?.chat_id,
+							generationMode: bodyObj?.generation_params?.generation_mode,
+							outputs: sseResult.outputs,
+							responseText: sseResult.responseText,
+							errors: sseResult.errors,
+							endpoint,
+						});
+						if (logPaths.length > 0) {
+							resultText += `\n[DIR] Logged to:\n`;
+							for (const p of logPaths) {
+								resultText += `  • ${p}\n`;
+							}
+						}
+					} catch {
+						// Ignore logging errors
+					}
+				}
+
+				// Add debug info if no outputs and endpoint has debug config
+				if (sseResult.outputs.length === 0 && endpoint?.debug) {
+					resultText += buildDebugInfo(cwd, endpoint, sseResult);
+				}
+			} else {
+				// Regular response - show truncated content
+				const maxLength = 10000;
+				let displayText = responseText;
+				let truncated = false;
+				if (responseText.length > maxLength) {
+					displayText = responseText.slice(0, maxLength);
+					truncated = true;
+				}
+
+				resultText += "\n" + displayText;
+				if (truncated) {
+					resultText += `\n\n[Truncated: ${responseText.length} bytes total]`;
+					if (outputFile) resultText += `\n[Full response: ${outputFile}]`;
+				} else if (outputFile) {
+					resultText += `\n\n[Saved: ${outputFile}]`;
+				}
+			}
+
+			// Add debug info on HTTP errors
+			if (!response.ok && endpoint?.debug) {
+				resultText += buildDebugInfo(cwd, endpoint, sseResult);
+			}
+
+			return {
+				content: [{ type: "text", text: resultText }],
+				details: {
+					status: response.status,
+					statusText: response.statusText,
+					duration,
+					contentType,
+					truncated: responseText.length > 10000,
+					outputFile,
+					outputs: sseResult?.outputs,
+					errors: sseResult?.errors,
+				},
+			};
+		} catch (error) {
+			const duration = Date.now() - startTime;
+			const message = error instanceof Error ? error.message : String(error);
+			return {
+				content: [{ type: "text", text: `Request failed: ${message}` }],
+				details: { error: message, duration },
+				isError: true,
+			};
+		}
+	}
 
 	// Register send_request tool
 	pi.registerTool({
@@ -1347,244 +1686,16 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 		}),
 
 		async execute(_toolCallId, params, onUpdate, ctx, signal) {
-			const { method = "GET", headers: extraHeaders = {}, body, save = false } = params;
-			let { url } = params;
-			const startTime = Date.now();
-
-			config = loadConfig(ctx.cwd);
-
-			// Handle named endpoints
-			let endpoint: EndpointConfig | undefined;
-			if (url.startsWith("@")) {
-				const endpointName = url.slice(1);
-				endpoint = config.endpoints?.find((e) => e.name === endpointName);
-				if (!endpoint) {
-					const available = config.endpoints?.map((e) => e.name).join(", ") || "none";
-					return {
-						content: [{ type: "text", text: `Endpoint "@${endpointName}" not found. Available: ${available}` }],
-						details: { error: true },
-						isError: true,
-					};
-				}
-				url = endpoint.url;
-			}
-
-			// Build full URL (resolve templates in baseUrl first)
-			if (!url.startsWith("http://") && !url.startsWith("https://")) {
-				if (config.baseUrl) {
-					const resolvedBaseUrl = resolveTemplates(config.baseUrl);
-					url = `${resolvedBaseUrl.replace(/\/$/, "")}/${url.replace(/^\//, "")}`;
-				} else {
-					return {
-						content: [{ type: "text", text: "URL must be absolute or configure baseUrl in .super-curl.json" }],
-						details: { error: true },
-						isError: true,
-					};
-				}
-			}
-
-			// Build headers and resolve templates
-			const rawHeaders: Record<string, string> = {
-				...(config.headers || {}),
-				...(endpoint?.headers || {}),
-				...extraHeaders,
-			};
-			const finalHeaders: Record<string, string> = {};
-			for (const [key, value] of Object.entries(rawHeaders)) {
-				finalHeaders[key] = resolveTemplates(value);
-			}
-
-			// Add auth
-			const auth = endpoint?.auth || config.auth;
-			if (auth && auth.type !== "none") {
-				Object.assign(finalHeaders, buildAuthHeader(auth));
-			}
-
-			// Add content-type for body
-			if (body && !finalHeaders["Content-Type"]) {
-				finalHeaders["Content-Type"] = "application/json";
-			}
-
-			// Merge body with endpoint defaults and resolve templates
-			let finalBody = body;
-			if (endpoint?.defaultBody && body) {
-				try {
-					const parsedBody = JSON.parse(body);
-					const merged = { ...endpoint.defaultBody, ...parsedBody };
-					// Resolve templates in the merged body
-					const resolved = resolveTemplatesInObject(merged);
-					finalBody = JSON.stringify(resolved);
-				} catch {
-					// Use as-is but still resolve templates
-					finalBody = resolveTemplates(body);
-				}
-			} else if (endpoint?.defaultBody && !body) {
-				const resolved = resolveTemplatesInObject(endpoint.defaultBody);
-				finalBody = JSON.stringify(resolved);
-			} else if (body) {
-				// Resolve templates in the body
-				try {
-					const parsed = JSON.parse(body);
-					const resolved = resolveTemplatesInObject(parsed);
-					finalBody = JSON.stringify(resolved);
-				} catch {
-					finalBody = resolveTemplates(body);
-				}
-			}
-
-			// Resolve templates in URL
-			url = resolveTemplates(url);
-
-			const effectiveMethod = endpoint?.method || method;
-
-			onUpdate?.({
-				content: [{ type: "text", text: `${effectiveMethod} ${url}...` }],
+			return executeRequest({
+				method: params.method || "GET",
+				url: params.url,
+				body: params.body,
+				headers: params.headers || {},
+				save: params.save || false,
+				cwd: ctx.cwd,
+				onUpdate,
+				signal,
 			});
-
-			try {
-				const controller = new AbortController();
-				const timeoutId = setTimeout(() => controller.abort(), config.timeout || 30000);
-				signal?.addEventListener("abort", () => controller.abort());
-
-				const response = await fetch(url, {
-					method: effectiveMethod,
-					headers: finalHeaders,
-					body: finalBody,
-					signal: controller.signal,
-				});
-
-				clearTimeout(timeoutId);
-
-				const contentType = response.headers.get("content-type");
-				const duration = Date.now() - startTime;
-				const shouldStream = endpoint?.stream || contentType?.includes("text/event-stream");
-
-				let responseText = await response.text();
-				let sseResult: SSEParseResult | null = null;
-
-				// Parse SSE if streaming endpoint
-				if (shouldStream) {
-					sseResult = parseSSEResponse(responseText);
-				}
-
-				// Format JSON (for non-streaming responses)
-				if (!shouldStream && contentType?.includes("application/json")) {
-					try {
-						responseText = JSON.stringify(JSON.parse(responseText), null, 2);
-					} catch {
-						// Keep as-is
-					}
-				}
-
-				// Save if requested
-				let outputFile: string | undefined;
-				if (save) {
-					outputFile = saveOutput(ctx.cwd, responseText, contentType, url);
-				}
-
-				// Build result text
-				const statusEmoji = response.ok ? "✓" : "✗";
-				let resultText = `${statusEmoji} ${response.status} ${response.statusText} (${duration}ms)\n`;
-
-				// For streaming responses, show parsed summary
-				if (sseResult) {
-					if (sseResult.outputs.length > 0) {
-						resultText += `\n[OK] Generated ${sseResult.outputs.length} output(s):\n`;
-						for (const out of sseResult.outputs) {
-							const gcsUrl = `gs://${out.bucket_name}/${out.object_key}`;
-							resultText += `  • ${out.file_type} (${out.width}x${out.height})\n`;
-							resultText += `    ID: ${out.inference_request_id}\n`;
-							resultText += `    GCS: ${gcsUrl}\n`;
-						}
-					}
-
-					if (sseResult.responseText) {
-						resultText += `\n[>] Agent response:\n${sseResult.responseText}\n`;
-					}
-
-					if (sseResult.errors.length > 0) {
-						resultText += `\n[ERR] Errors:\n`;
-						for (const err of sseResult.errors) {
-							resultText += `  • ${err}\n`;
-						}
-					}
-
-					// Log generation to output directory
-					if (config.outputDir) {
-						try {
-							const bodyObj = finalBody ? JSON.parse(finalBody) : {};
-							const logPaths = logGeneration({
-								cwd: ctx.cwd,
-								prompt: bodyObj?.generation_params?.positive_prompt || "",
-								restructuredPrompt: sseResult.restructuredPrompt,
-								chatId: bodyObj?.chat_id,
-								generationMode: bodyObj?.generation_params?.generation_mode,
-								outputs: sseResult.outputs,
-								responseText: sseResult.responseText,
-								errors: sseResult.errors,
-								endpoint,
-							});
-							if (logPaths.length > 0) {
-								resultText += `\n[DIR] Logged to:\n`;
-								for (const p of logPaths) {
-									resultText += `  • ${p}\n`;
-								}
-							}
-						} catch {
-							// Ignore logging errors
-						}
-					}
-
-					// Add debug info if no outputs and endpoint has debug config
-					if (sseResult.outputs.length === 0 && endpoint?.debug) {
-						resultText += buildDebugInfo(ctx.cwd, endpoint, sseResult);
-					}
-				} else {
-					// Regular response - show truncated content
-					const maxLength = 10000;
-					let displayText = responseText;
-					let truncated = false;
-					if (responseText.length > maxLength) {
-						displayText = responseText.slice(0, maxLength);
-						truncated = true;
-					}
-
-					resultText += "\n" + displayText;
-					if (truncated) {
-						resultText += `\n\n[Truncated: ${responseText.length} bytes total]`;
-						if (outputFile) resultText += `\n[Full response: ${outputFile}]`;
-					} else if (outputFile) {
-						resultText += `\n\n[Saved: ${outputFile}]`;
-					}
-				}
-
-				// Add debug info on HTTP errors
-				if (!response.ok && endpoint?.debug) {
-					resultText += buildDebugInfo(ctx.cwd, endpoint, sseResult);
-				}
-
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: {
-						status: response.status,
-						statusText: response.statusText,
-						duration,
-						contentType,
-						truncated: responseText.length > 10000,
-						outputFile,
-						outputs: sseResult?.outputs,
-						errors: sseResult?.errors,
-					},
-				};
-			} catch (error) {
-				const duration = Date.now() - startTime;
-				const message = error instanceof Error ? error.message : String(error);
-				return {
-					content: [{ type: "text", text: `Request failed: ${message}` }],
-					details: { error: message, duration },
-					isError: true,
-				};
-			}
 		},
 
 		renderCall(args, theme) {
