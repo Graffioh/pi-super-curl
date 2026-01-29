@@ -1,4 +1,4 @@
-# Super Curl
+# pi-super-curl
 
 A pi extension for sending HTTP requests with automatic configuration, authentication (including JWT generation), and response handling.
 
@@ -6,17 +6,17 @@ A pi extension for sending HTTP requests with automatic configuration, authentic
 
 ```bash
 # Load directly
-pi -e ~/Desktop/super-curl
+pi -e ~/Desktop/pi-super-curl
 
 # Or symlink to extensions directory for auto-discovery
-ln -s ~/Desktop/super-curl ~/.pi/agent/extensions/super-curl
+ln -s ~/Desktop/pi-super-curl ~/.pi/agent/extensions/pi-super-curl
 ```
 
 ## Quick Start
 
 ```bash
 # Start pi with the extension
-pi -e ~/Desktop/super-curl
+pi -e ~/Desktop/pi-super-curl
 
 # Ask the LLM to make requests
 > Send a GET request to https://api.github.com/users/octocat
