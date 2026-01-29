@@ -1,423 +1,181 @@
-# pi-super-curl
+# Pi Super Curl
 
-A pi extension for sending HTTP requests with automatic configuration, authentication (including JWT generation), and response handling.
+A [Pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl`.
 
-## Installation
+<!-- Video demo will go here -->
 
-```bash
-# Load directly
-pi -e ~/Desktop/pi-super-curl
+## Why
 
-# Or symlink to extensions directory for auto-discovery
-ln -s ~/Desktop/pi-super-curl ~/.pi/agent/extensions/pi-super-curl
+API testing during development is repetitive. You're constantly:
+- Copying auth tokens between tools
+- Regenerating expired JWTs
+- Retyping the same endpoints
+- Losing context switching between Postman and your terminal
+
+Pi Super Curl gives you a Postman-like request builder right in your terminal:
+
+```
+/scurl
 ```
 
-### Optional: Install the api-tester Agent
-
-The extension includes a lightweight `api-tester` agent for delegating API requests:
+## Install
 
 ```bash
-# Symlink the agent to your agents directory
-ln -sf ~/Desktop/pi-super-curl/agents/api-tester.md ~/.pi/agent/agents/api-tester.md
+pi install npm:pi-super-curl
 ```
-
-Then use it:
-```bash
-> Use api-tester to test GET https://httpbin.org/get
-> Use api-tester to call @health endpoint
-```
-
-The agent runs on `claude-haiku-4-5` and returns concise summaries, perfect for quick API testing without cluttering your main conversation.
 
 ## Quick Start
 
-```bash
-# Start pi with the extension
-pi -e ~/Desktop/pi-super-curl
-
-# Ask the LLM to make requests
-> Send a GET request to https://api.github.com/users/octocat
-
-# Or use the /curl command
-> /curl GET https://httpbin.org/get
-
-# Use named endpoint with dynamic values
-> /curl POST @chat --body '{"generation_params": {"positive_prompt": "a ninja"}}'
-```
-
-## Configuration
-
-Create `.super-curl.json` in your project root or home directory:
+1. Create `.super-curl.json`:
 
 ```json
 {
   "baseUrl": "https://api.example.com",
-  "timeout": 30000,
-  "outputDir": "~/Desktop/api-responses",
-  "envFile": ".env.development",
   "auth": {
     "type": "bearer",
     "token": "$API_TOKEN"
   },
-  "headers": {
-    "X-Custom-Header": "value"
-  },
   "endpoints": [
     {
-      "name": "users",
-      "url": "/v1/users",
-      "method": "GET"
+      "name": "...",
+      "url": "...",
+      "method": "..."
     }
   ]
 }
 ```
 
-### Configuration Options
+2. Run `/scurl` to open the request builder
 
-| Option | Description | Default |
-|--------|-------------|---------|
-| `baseUrl` | Base URL for relative paths | - |
-| `timeout` | Request timeout in ms | 30000 |
-| `outputDir` | Directory to save responses | cwd |
-| `envFile` | Path to .env file to load | - |
-| `auth` | Authentication config | - |
-| `headers` | Default headers for all requests | - |
-| `endpoints` | Named endpoint shortcuts | - |
+## Commands
 
-## Environment File Loading
+### `/scurl`
 
-Load variables from a `.env` file:
+Opens the interactive request builder UI. Build your request visually, then execute it directly.
 
-```json
-{
-  "envFile": ".env.development"
-}
-```
+- **Ctrl+T** - Switch to template mode (quick access to configured endpoints)
+- **Tab** - Navigate between fields
+- **Enter** - Send request
 
-Paths can be:
-- Relative to project: `.env.development`
-- Absolute: `/path/to/.env`
-- Home-relative: `~/.env`
+### `/scurl-agent`
 
-## Template Variables
+Same UI as `/scurl`, but delegates execution to the `api-tester` subagent. 
 
-Use template variables in URLs, headers, and body:
+This runs on `claude-haiku-4-5` and returns a concise summary without cluttering your main conversation context. Perfect for quick API checks.
 
-| Template | Description | Example |
-|----------|-------------|---------|
-| `{{uuid}}` or `{{uuidv4}}` | Random UUID v4 | `550e8400-e29b-41d4-a716-446655440000` |
-| `{{uuidv7}}` | Time-ordered UUID v7 | `019abc12-3456-7890-abcd-ef1234567890` |
-| `{{timestamp}}` | Unix timestamp (seconds) | `1706500000` |
-| `{{timestamp_ms}}` | Unix timestamp (ms) | `1706500000123` |
-| `{{date}}` | ISO date string | `2024-01-29T10:00:00.000Z` |
-| `{{env.VAR}}` | Environment variable | Value of `$VAR` |
-| `{{$VAR}}` | Environment variable | Value of `$VAR` |
+## Configuration
 
-### Example with Templates
+### Named Endpoints
+
+Define frequently-used endpoints:
 
 ```json
 {
   "endpoints": [
     {
       "name": "chat",
-      "url": "/v1/chat/messages",
+      "url": "/v1/chat/completions",
       "method": "POST",
       "defaultBody": {
-        "chat_id": "{{uuidv7}}",
-        "workspace_id": "{{env.WORKSPACE_ID}}",
-        "timestamp": "{{timestamp}}"
+        "model": "gpt-4",
+        "temperature": 0.7
       }
     }
   ]
 }
 ```
 
-## Authentication Types
+### Templates
 
-### Bearer Token
+Create quick-access templates with custom text fields so that you can reuse common API requests in a blink:
+
 ```json
 {
-  "auth": {
-    "type": "bearer",
-    "token": "$MY_API_TOKEN"
-  }
+  "templates": [
+    {
+      "name": "quick-chat",
+      "description": "Send a chat message",
+      "endpoint": "chat",
+      "fields": [
+        {
+          "name": "message",
+          "label": "Your message",
+          "path": "messages[0].content"
+        }
+      ]
+    }
+  ]
 }
 ```
 
-Values starting with `$` are resolved from environment variables.
+Check `.super-curl.json` in this root project to understand a bit more how to structure a possible template.
 
-### API Key
+### Authentication
+
+**Bearer Token:**
 ```json
-{
-  "auth": {
-    "type": "api-key",
-    "token": "$API_KEY",
-    "header": "X-API-Key"
-  }
-}
+{ "auth": { "type": "bearer", "token": "$API_TOKEN" } }
 ```
 
-### Basic Auth
+**API Key:**
 ```json
-{
-  "auth": {
-    "type": "basic",
-    "username": "$USERNAME",
-    "password": "$PASSWORD"
-  }
-}
+{ "auth": { "type": "api-key", "token": "$API_KEY", "header": "X-API-Key" } }
 ```
 
-### JWT Token (Dynamic Generation) 🆕
+**Basic Auth:**
+```json
+{ "auth": { "type": "basic", "username": "$USER", "password": "$PASS" } }
+```
 
-Generate fresh JWT tokens on every request:
-
+**JWT (auto-generated per request):**
 ```json
 {
   "auth": {
     "type": "jwt",
-    "secret": "$SUPABASE_JWT_SECRET",
-    "algorithm": "HS256",
+    "secret": "$JWT_SECRET",
     "expiresIn": 3600,
     "payload": {
       "user_id": "{{env.USER_ID}}",
-      "email": "{{env.EMAIL}}",
-      "org_ids": ["{{env.ORG_ID}}"],
-      "sub": "{{env.USER_ID}}",
       "role": "authenticated"
     }
   }
 }
 ```
 
-**JWT Options:**
+### Template Variables
+
+Dynamic values in URLs, headers, and body:
+
+| Template | Description |
+|----------|-------------|
+| `{{uuid}}` | Random UUID v4 |
+| `{{uuidv7}}` | Time-ordered UUID v7 |
+| `{{timestamp}}` | Unix timestamp (seconds) |
+| `{{timestamp_ms}}` | Unix timestamp (ms) |
+| `{{date}}` | ISO date string |
+| `{{env.VAR}}` or `{{$VAR}}` | Environment variable |
+
+### Environment File
+
+```json
+{
+  "envFile": ".env"
+}
+```
+
+### Full Configuration Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `secret` | JWT signing secret (use `$ENV_VAR`) | Required |
-| `algorithm` | Signing algorithm | `HS256` |
-| `expiresIn` | Token expiry in seconds | `3600` |
-| `payload` | JWT payload (supports templates) | `{}` |
+| `baseUrl` | Base URL for relative paths | - |
+| `timeout` | Request timeout in ms | 30000 |
+| `outputDir` | Directory to save responses | cwd |
+| `envFile` | Path to .env file | - |
+| `auth` | Authentication config | - |
+| `headers` | Default headers | - |
+| `endpoints` | Named endpoint definitions | - |
+| `templates` | Quick-access templates | - |
 
-The `iat` and `exp` claims are auto-generated if not in payload.
+## License
 
-## SSE Streaming & Debug Support
-
-For streaming APIs (like AI chat endpoints), enable SSE parsing:
-
-```json
-{
-  "endpoints": [
-    {
-      "name": "chat",
-      "url": "/api/chat/messages",
-      "method": "POST",
-      "stream": true,
-      "debug": {
-        "workflowLogs": "apps/server/.next/dev/logs/next-development.log",
-        "backendLogs": "/tmp/backend-output.txt"
-      }
-    }
-  ]
-}
-```
-
-When `stream: true`:
-- Parses SSE `data:` events
-- Extracts `text-delta` (agent responses)
-- Captures `tool-output-available` (generated files)
-- Detects errors and tool calls
-- On failure, reads and includes debug logs
-
-### Output Format (Streaming)
-
-```
-✓ 200 OK (5234ms)
-
-✅ Generated 1 output(s):
-  • image/png (1024x1024)
-    ID: 019abc12-3456-7890-abcd-ef1234567890
-    GCS: gs://bucket/path/to/output.png
-
-📝 Agent response:
-I've generated an image of a cyberpunk ninja...
-```
-
-### Debug Output (On Error)
-
-```
-=== DEBUG INFO ===
-
-📛 Errors from response:
-  - Generation failed: timeout
-
-🔧 Tool calls made:
-  - text_to_image_generation
-
-📁 Log files to check:
-  - Workflow logs: /path/to/workflow.log
-
---- Last workflow logs ---
-[2024-01-29 10:00:00] Error: ComfyUI connection refused
-...
---- End workflow logs ---
-```
-
-## Morphic Platform Example
-
-For the Morphic platform-backend, copy `morphic.super-curl.json` to your project:
-
-```bash
-cp morphic.super-curl.json ~/Desktop/morphic/platform-backend/.super-curl.json
-```
-
-Then use:
-```bash
-# Generate an image
-/curl @chat --body '{"generation_params": {"positive_prompt": "a cyberpunk ninja"}}'
-
-# Generate a video  
-/curl @chat-video --body '{"generation_params": {"positive_prompt": "a dancing robot"}}'
-
-# Text/copilot mode
-/curl @chat-text --body '{"content": "list files in docs/"}'
-```
-
-**On success**: Shows generated outputs with GCS URLs and inference request IDs
-**On failure**: Automatically includes last 50 lines from workflow logs for debugging
-
-Required `.env.development` variables:
-```env
-SUPABASE_JWT_SECRET=your-jwt-secret
-MORPHIC_WORKSPACE_ID=your-workspace-id
-MORPHIC_FILE_ID=your-file-id
-MORPHIC_ORG_ID=your-org-id
-MORPHIC_USER_ID=your-user-id
-MORPHIC_EMAIL=your-email@example.com
-```
-
-## Tool: send_request
-
-The LLM can use the `send_request` tool to make HTTP requests.
-
-### Parameters
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `method` | string | HTTP method: GET, POST, PUT, PATCH, DELETE |
-| `url` | string | Full URL, path (with baseUrl), or @endpoint |
-| `headers` | object | Additional headers |
-| `body` | string | Request body (JSON string) |
-| `save` | boolean | Save response to output directory |
-
-### Examples
-
-```
-# Simple GET
-Use send_request to GET https://api.github.com/users/octocat
-
-# POST with body
-Use send_request to POST /api/users with body {"name": "John"}
-
-# Named endpoint
-Use send_request to call @users endpoint
-
-# Save response
-Use send_request to GET /api/data and save the response
-
-# With dynamic chat_id (auto-generated)
-Use send_request to POST @chat with body {"generation_params": {"positive_prompt": "a sunset"}}
-```
-
-## Commands
-
-### /request
-
-Open the interactive Postman-like request builder UI:
-```
-/request
-```
-
-### /curl
-
-Quick HTTP request from the command line (direct execution):
-
-```
-/curl GET https://httpbin.org/get
-/curl POST @chat --body '{"prompt": "hello"}'
-```
-
-### /curl-agent
-
-HTTP request via the `api-tester` subagent (isolated context, concise output):
-
-```
-/curl-agent GET https://httpbin.org/get
-/curl-agent POST @chat --body '{"prompt": "hello"}'
-```
-
-This delegates to the `api-tester` agent running on `claude-haiku-4-5`, which returns a concise summary without cluttering your main conversation context.
-
-### /endpoints
-
-List configured endpoints:
-
-```
-/endpoints
-```
-
-## Named Endpoints
-
-Define frequently-used endpoints in your config:
-
-```json
-{
-  "endpoints": [
-    {
-      "name": "health",
-      "url": "/health",
-      "method": "GET"
-    },
-    {
-      "name": "create-item",
-      "url": "/items",
-      "method": "POST",
-      "defaultBody": {
-        "id": "{{uuidv7}}",
-        "created_at": "{{date}}"
-      }
-    }
-  ]
-}
-```
-
-Then use them:
-```
-/curl @health
-/curl @create-item --body '{"name": "Widget"}'
-```
-
-Body provided via `--body` is merged with `defaultBody` (your values override defaults).
-
-## Response Handling
-
-- **Truncation**: Large responses are truncated to 10KB for LLM context
-- **Saving**: Use `save: true` to save full response to output directory
-- **JSON formatting**: JSON responses are automatically pretty-printed
-
-## Output Directory
-
-When `save: true` is set, responses are saved to:
-- The `outputDir` from config (supports `~` for home directory)
-- Or `~/Desktop/api-responses` if not configured
-
-Files are named: `response_<timestamp>_<path>.<extension>`
-
-## Philosophy
-
-This extension is designed for:
-- **Configuration over repetition**: Define auth and headers once
-- **Dynamic tokens**: Generate fresh JWT tokens per request
-- **Named endpoints**: Quick access to frequently-used APIs
-- **Template variables**: Dynamic values without code changes
-- **LLM-friendly**: Truncation and formatting for context efficiency
+MIT

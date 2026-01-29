@@ -1,7 +1,33 @@
 {
   "name": "pi-super-curl",
   "version": "1.0.0",
+  "description": "HTTP request extension for Pi coding agent with auto-config, JWT generation, and named endpoints",
   "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "http",
+    "curl",
+    "api",
+    "rest",
+    "jwt",
+    "postman",
+    "claude",
+    "gemini",
+    "codex"
+  ],
+  "author": "Graffioh",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Graffioh/pi-super-curl"
+  },
+  "homepage": "https://github.com/Graffioh/pi-super-curl#readme",
+  "bugs": {
+    "url": "https://github.com/Graffioh/pi-super-curl/issues"
+  },
   "dependencies": {
     "dotenv": "^16.4.0",
     "jsonwebtoken": "^9.0.2",

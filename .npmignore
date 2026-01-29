@@ -1,0 +1,6 @@
+.DS_Store
+.env
+.super-curl.json
+node_modules/
+bun.lock
+tsconfig.json
