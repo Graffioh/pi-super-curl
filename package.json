@@ -1,0 +1,16 @@
+{
+  "name": "super-curl",
+  "version": "1.0.0",
+  "type": "module",
+  "dependencies": {
+    "dotenv": "^16.4.0",
+    "jsonwebtoken": "^9.0.2",
+    "uuid": "^11.0.0"
+  },
+  "devDependencies": {
+    "@types/jsonwebtoken": "^9.0.9",
+    "@types/node": "^25.1.0",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.9.3"
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "baseUrl": "https://httpbin.org",
+  "timeout": 30000,
+  "outputDir": "~/Desktop/api-responses",
+  "headers": {
+    "User-Agent": "super-curl/1.0"
+  },
+  "endpoints": [
+    {
+      "name": "get",
+      "url": "/get",
+      "method": "GET"
+    },
+    {
+      "name": "post",
+      "url": "/post",
+      "method": "POST",
+      "defaultBody": {
+        "source": "super-curl"
+      }
+    },
+    {
+      "name": "status",
+      "url": "/status/200",
+      "method": "GET"
+    }
+  ],
+  "templates": [
+    {
+      "name": "quick-post",
+      "description": "Quick POST with timestamp",
+      "endpoint": "post",
+      "body": {
+        "timestamp": "{{timestamp}}",
+        "request_id": "{{uuid}}"
+      }
+    },
+    {
+      "name": "json-post",
+      "description": "POST with JSON content type",
+      "endpoint": "post",
+      "body": {
+        "data": {
+          "message": "Hello from super-curl",
+          "created_at": "{{date}}"
+        }
+      },
+      "headers": {
+        "Accept": "application/json"
+      }
+    },
+    {
+      "name": "check-headers",
+      "description": "Inspect request headers",
+      "endpoint": "headers"
+    }
+  ]
+}
