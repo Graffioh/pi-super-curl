@@ -12,6 +12,23 @@ pi -e ~/Desktop/pi-super-curl
 ln -s ~/Desktop/pi-super-curl ~/.pi/agent/extensions/pi-super-curl
 ```
 
+### Optional: Install the api-tester Agent
+
+The extension includes a lightweight `api-tester` agent for delegating API requests:
+
+```bash
+# Symlink the agent to your agents directory
+ln -sf ~/Desktop/pi-super-curl/agents/api-tester.md ~/.pi/agent/agents/api-tester.md
+```
+
+Then use it:
+```bash
+> Use api-tester to test GET https://httpbin.org/get
+> Use api-tester to call @health endpoint
+```
+
+The agent runs on `claude-haiku-4-5` and returns concise summaries, perfect for quick API testing without cluttering your main conversation.
+
 ## Quick Start
 
 ```bash
@@ -323,12 +340,23 @@ Open the interactive Postman-like request builder UI:
 
 ### /curl
 
-Quick HTTP request from the command line:
+Quick HTTP request from the command line (direct execution):
 
 ```
 /curl GET https://httpbin.org/get
 /curl POST @chat --body '{"prompt": "hello"}'
 ```
+
+### /curl-agent
+
+HTTP request via the `api-tester` subagent (isolated context, concise output):
+
+```
+/curl-agent GET https://httpbin.org/get
+/curl-agent POST @chat --body '{"prompt": "hello"}'
+```
+
+This delegates to the `api-tester` agent running on `claude-haiku-4-5`, which returns a concise summary without cluttering your main conversation context.
 
 ### /endpoints
 

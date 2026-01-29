@@ -13,7 +13,8 @@
  *
  * Commands:
  *   /request - Open Postman-like request builder UI
- *   /curl [METHOD] URL - Quick request
+ *   /curl [METHOD] URL - Quick request (direct)
+ *   /curl-agent [METHOD] URL - Quick request via api-tester subagent
  *   /endpoints - List configured endpoints
  */
 
@@ -1778,6 +1779,575 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 			}
 
 			pi.sendUserMessage(message);
+		},
+	});
+
+	// /scurl-agent command - opens UI then delegates to api-tester subagent
+	pi.registerCommand("scurl-agent", {
+		description: "Open Super Curl UI, then delegate to api-tester subagent (Ctrl+T for templates)",
+		handler: async (_args, ctx) => {
+			config = loadConfig(ctx.cwd);
+
+			// Build template list (same as /scurl)
+			interface TemplateOption {
+				name: string;
+				label: string;
+				description?: string;
+				endpoint?: EndpointConfig;
+				bodyOverrides?: Record<string, unknown>;
+				extraHeaders?: Record<string, string>;
+				fields?: TemplateFieldConfig[];
+			}
+			
+			const templateOptions: TemplateOption[] = [];
+			
+			if (config.templates && config.templates.length > 0) {
+				for (const tpl of config.templates) {
+					const ep = config.endpoints?.find(e => e.name === tpl.endpoint);
+					templateOptions.push({
+						name: tpl.name,
+						label: tpl.description || `${tpl.name} → @${tpl.endpoint}`,
+						description: tpl.description,
+						endpoint: ep,
+						bodyOverrides: tpl.body,
+						extraHeaders: tpl.headers,
+						fields: tpl.fields,
+					});
+				}
+			} else {
+				for (const ep of config.endpoints || []) {
+					templateOptions.push({
+						name: ep.name,
+						label: `@${ep.name} (${ep.method || "GET"})`,
+						endpoint: ep,
+					});
+				}
+			}
+
+			const result = await ctx.ui.custom<RequestBuilderResult>((tui, theme, _kb, done) => {
+				let mode: "template" | "default" = "default";
+				let endpointIndex = 0;
+				let methodIndex = 0;
+				let fieldEditors: Map<string, Editor> = new Map();
+				let templateFieldIndex = 0;
+				type CustomField = "method" | "url" | "body" | "headers";
+				let customField: CustomField = "method";
+				let cachedLines: string[] | undefined;
+
+				const editorTheme: EditorTheme = {
+					borderColor: (s) => theme.fg("accent", s),
+					selectList: {
+						selectedPrefix: (t) => theme.fg("accent", t),
+						selectedText: (t) => theme.fg("accent", t),
+						description: (t) => theme.fg("muted", t),
+						scrollInfo: (t) => theme.fg("dim", t),
+						noMatch: (t) => theme.fg("warning", t),
+					},
+				};
+
+				const urlEditor = new Editor(tui, editorTheme);
+				const bodyEditor = new Editor(tui, editorTheme);
+				const headersEditor = new Editor(tui, editorTheme);
+
+				const defaultPromptField: TemplateFieldConfig = {
+					name: "prompt",
+					label: "",
+					path: "generation_params.positive_prompt",
+				};
+				
+				function getTemplateFields(): string[] {
+					const fields = ["endpoint"];
+					const tpl = templateOptions[endpointIndex];
+					if (tpl?.fields && tpl.fields.length > 0) {
+						for (const f of tpl.fields) fields.push(f.name);
+					} else {
+						fields.push("prompt");
+					}
+					fields.push("body", "headers");
+					return fields;
+				}
+				
+				function getTemplateFieldConfigs(): TemplateFieldConfig[] {
+					const tpl = templateOptions[endpointIndex];
+					if (tpl?.fields && tpl.fields.length > 0) return tpl.fields;
+					return [defaultPromptField];
+				}
+				
+				function getCurrentTemplateField(): string {
+					const fields = getTemplateFields();
+					return fields[templateFieldIndex] || "endpoint";
+				}
+				
+				function getFieldEditor(fieldName: string): Editor {
+					if (!fieldEditors.has(fieldName)) {
+						const editor = new Editor(tui, editorTheme);
+						const tpl = templateOptions[endpointIndex];
+						const fieldConfig = tpl?.fields?.find(f => f.name === fieldName);
+						if (fieldConfig?.default) editor.setText(fieldConfig.default);
+						fieldEditors.set(fieldName, editor);
+					}
+					return fieldEditors.get(fieldName)!;
+				}
+
+				function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
+					const result = { ...target };
+					for (const key of Object.keys(source)) {
+						if (source[key] && typeof source[key] === "object" && !Array.isArray(source[key])) {
+							if (target[key] && typeof target[key] === "object" && !Array.isArray(target[key])) {
+								result[key] = deepMerge(target[key] as Record<string, unknown>, source[key] as Record<string, unknown>);
+							} else {
+								result[key] = source[key];
+							}
+						} else {
+							result[key] = source[key];
+						}
+					}
+					return result;
+				}
+
+				function loadTemplate(idx: number) {
+					if (idx < 0 || idx >= templateOptions.length) return;
+					const opt = templateOptions[idx];
+					if (opt.endpoint) {
+						const methodIdx = METHODS.indexOf(opt.endpoint.method || "GET");
+						if (methodIdx >= 0) methodIndex = methodIdx;
+						
+						let body: Record<string, unknown> = {};
+						if (opt.endpoint.defaultBody) {
+							body = JSON.parse(JSON.stringify(opt.endpoint.defaultBody));
+						}
+						if (opt.bodyOverrides) {
+							body = deepMerge(body, opt.bodyOverrides);
+						}
+						
+						if (Object.keys(body).length > 0) {
+							bodyEditor.setText(JSON.stringify(body, null, 2));
+						} else {
+							bodyEditor.setText("");
+						}
+						
+						if (opt.extraHeaders) {
+							const headerLines = Object.entries(opt.extraHeaders)
+								.map(([k, v]) => `${k}: ${v}`)
+								.join("\n");
+							headersEditor.setText(headerLines);
+						} else {
+							headersEditor.setText("");
+						}
+						
+						fieldEditors = new Map();
+						const fieldsToSetup = (opt.fields && opt.fields.length > 0) ? opt.fields : [defaultPromptField];
+						for (const f of fieldsToSetup) {
+							const editor = new Editor(tui, editorTheme);
+							if (f.default) editor.setText(f.default);
+							fieldEditors.set(f.name, editor);
+						}
+						
+						templateFieldIndex = 0;
+					}
+				}
+
+				function refresh() {
+					cachedLines = undefined;
+					tui.requestRender();
+				}
+
+				function getActiveEditor(): Editor | null {
+					if (mode === "template") {
+						const currentField = getCurrentTemplateField();
+						if (currentField === "endpoint") return null;
+						if (currentField === "body") return bodyEditor;
+						if (currentField === "headers") return headersEditor;
+						return getFieldEditor(currentField);
+					} else {
+						switch (customField) {
+							case "url": return urlEditor;
+							case "body": return bodyEditor;
+							case "headers": return headersEditor;
+							default: return null;
+						}
+					}
+				}
+
+				function setAtPath(obj: Record<string, unknown>, pathStr: string, value: unknown): void {
+					const parts = pathStr.split(".");
+					let current = obj;
+					for (let i = 0; i < parts.length - 1; i++) {
+						const part = parts[i];
+						if (!(part in current) || typeof current[part] !== "object") {
+							current[part] = {};
+						}
+						current = current[part] as Record<string, unknown>;
+					}
+					current[parts[parts.length - 1]] = value;
+				}
+
+				function buildFinalBody(): string {
+					const bodyText = bodyEditor.getText().trim();
+					if (mode === "template") {
+						const fieldConfigs = getTemplateFieldConfigs();
+						try {
+							const body = bodyText ? JSON.parse(bodyText) : {};
+							for (const fieldConfig of fieldConfigs) {
+								if (!fieldConfig.path) continue;
+								const editor = fieldEditors.get(fieldConfig.name);
+								const value = editor?.getText().trim() || "";
+								if (value) setAtPath(body, fieldConfig.path, value);
+							}
+							return JSON.stringify(body);
+						} catch {
+							return bodyText;
+						}
+					}
+					return bodyText;
+				}
+
+				function getUrl(): string {
+					if (mode === "template" && templateOptions.length > 0) {
+						const tpl = templateOptions[endpointIndex];
+						return `@${tpl.endpoint?.name || tpl.name}`;
+					}
+					return urlEditor.getText().trim();
+				}
+
+				function submit() {
+					done({
+						method: METHODS[methodIndex],
+						url: getUrl(),
+						body: buildFinalBody(),
+						headers: headersEditor.getText().trim(),
+						cancelled: false,
+						endpoint: mode === "template" ? templateOptions[endpointIndex]?.name : undefined,
+					});
+				}
+
+				function handleInput(data: string) {
+					if (matchesKey(data, Key.escape)) {
+						done({ method: METHODS[methodIndex], url: "", body: "", headers: "", cancelled: true });
+						return;
+					}
+
+					if (matchesKey(data, Key.ctrl("t"))) {
+						if (mode === "template" && templateOptions.length > 0) {
+							mode = "default";
+							customField = "method";
+							methodIndex = 0;
+							urlEditor.setText("");
+							bodyEditor.setText("");
+							headersEditor.setText("");
+						} else if (mode === "default" && templateOptions.length > 0) {
+							mode = "template";
+							templateFieldIndex = 0;
+							loadTemplate(endpointIndex);
+						}
+						refresh();
+						return;
+					}
+
+					if (data === "\r" || data === "\n" || matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("j")) || matchesKey(data, Key.ctrl("enter"))) {
+						submit();
+						return;
+					}
+
+					if (matchesKey(data, Key.tab)) {
+						if (mode === "template") {
+							const fields = getTemplateFields();
+							templateFieldIndex = (templateFieldIndex + 1) % fields.length;
+						} else {
+							const method = METHODS[methodIndex];
+							const fields: CustomField[] = (method === "GET") 
+								? ["method", "url", "headers"]
+								: ["method", "url", "body", "headers"];
+							const currentIndex = fields.indexOf(customField);
+							customField = fields[(currentIndex + 1) % fields.length];
+						}
+						refresh();
+						return;
+					}
+
+					if (matchesKey(data, Key.shift("tab"))) {
+						if (mode === "template") {
+							const fields = getTemplateFields();
+							templateFieldIndex = (templateFieldIndex - 1 + fields.length) % fields.length;
+						} else {
+							const method = METHODS[methodIndex];
+							const fields: CustomField[] = (method === "GET") 
+								? ["method", "url", "headers"]
+								: ["method", "url", "body", "headers"];
+							const currentIndex = fields.indexOf(customField);
+							customField = fields[(currentIndex - 1 + fields.length) % fields.length];
+						}
+						refresh();
+						return;
+					}
+
+					// Handle method/endpoint selection with arrow keys
+					if (mode === "template" && getCurrentTemplateField() === "endpoint") {
+						if (matchesKey(data, Key.up) || matchesKey(data, Key.left)) {
+							endpointIndex = (endpointIndex - 1 + templateOptions.length) % templateOptions.length;
+							loadTemplate(endpointIndex);
+							refresh();
+							return;
+						}
+						if (matchesKey(data, Key.down) || matchesKey(data, Key.right)) {
+							endpointIndex = (endpointIndex + 1) % templateOptions.length;
+							loadTemplate(endpointIndex);
+							refresh();
+							return;
+						}
+					}
+					
+					if (mode === "default" && customField === "method") {
+						if (matchesKey(data, Key.left)) {
+							methodIndex = (methodIndex - 1 + METHODS.length) % METHODS.length;
+							refresh();
+							return;
+						}
+						if (matchesKey(data, Key.right)) {
+							methodIndex = (methodIndex + 1) % METHODS.length;
+							refresh();
+							return;
+						}
+					}
+
+					// Forward to active editor
+					const editor = getActiveEditor();
+					if (editor) {
+						editor.handleInput(data);
+						refresh();
+					}
+				}
+
+				function render(width: number): string[] {
+					if (cachedLines) return cachedLines;
+
+					const lines: string[] = [];
+					const boxWidth = Math.min(80, width - 4);
+					const innerWidth = boxWidth - 4;
+					const method = METHODS[methodIndex];
+
+					// Title
+					const title = mode === "template" 
+						? " 🚀 Super Curl → Subagent " 
+						: " 🚀 Super Curl (Custom) → Subagent ";
+					const modeHint = mode === "template" 
+						? theme.fg("dim", " Ctrl+T: custom mode") 
+						: theme.fg("dim", " Ctrl+T: template mode");
+					
+					function topBorder() {
+						const titleLen = title.replace(/[^\x20-\x7E]/g, " ").length;
+						const remaining = boxWidth - 2 - titleLen;
+						return theme.fg("accent", "╭") + theme.fg("accent", theme.bold(title)) + theme.fg("accent", "─".repeat(remaining) + "╮");
+					}
+					function bottomBorder() {
+						return theme.fg("accent", "╰" + "─".repeat(boxWidth - 2) + "╯");
+					}
+					function divider() {
+						return theme.fg("accent", "├" + "─".repeat(boxWidth - 2) + "┤");
+					}
+					function row(content: string) {
+						const contentLen = content.replace(/\x1b\[[0-9;]*m/g, "").length;
+						const padding = Math.max(0, innerWidth - contentLen);
+						return theme.fg("accent", "│ ") + content + " ".repeat(padding) + theme.fg("accent", " │");
+					}
+					function fieldLabel(label: string, active: boolean, hint?: string) {
+						const labelText = active ? theme.fg("accent", theme.bold(label)) : theme.fg("muted", label);
+						if (hint) return labelText + " " + theme.fg("dim", `(${hint})`);
+						return labelText;
+					}
+
+					lines.push("");
+					lines.push(topBorder());
+					lines.push(row(modeHint));
+					lines.push(divider());
+
+					if (mode === "template") {
+						// Endpoint selector
+						const endpointActive = getCurrentTemplateField() === "endpoint";
+						lines.push(row(fieldLabel("Endpoint:", endpointActive, "↑↓ to change")));
+						
+						const maxVisible = 3;
+						const startIdx = Math.max(0, endpointIndex - 1);
+						const endIdx = Math.min(templateOptions.length, startIdx + maxVisible);
+						
+						for (let i = startIdx; i < endIdx; i++) {
+							const opt = templateOptions[i];
+							const isSelected = i === endpointIndex;
+							const prefix = isSelected ? (endpointActive ? "▸ " : "› ") : "  ";
+							const text = isSelected && endpointActive
+								? theme.fg("accent", prefix + opt.label)
+								: isSelected
+								? theme.fg("text", prefix + opt.label)
+								: theme.fg("dim", prefix + opt.label);
+							lines.push(row(text));
+						}
+						
+						if (templateOptions.length > maxVisible) {
+							lines.push(row(theme.fg("dim", `  (${endpointIndex + 1}/${templateOptions.length})`)));
+						}
+						lines.push(divider());
+
+						// Custom fields
+						const fieldConfigs = getTemplateFieldConfigs();
+						const currentField = getCurrentTemplateField();
+						
+						for (const fieldConfig of fieldConfigs) {
+							const fieldActive = currentField === fieldConfig.name;
+							const labelText = fieldConfig.label || fieldConfig.name;
+							const hint = fieldConfig.hint || (fieldConfig.path ? `→ ${fieldConfig.path}` : undefined);
+							lines.push(row(fieldLabel(labelText ? `${labelText}:` : "", fieldActive, hint)));
+							
+							const editor = getFieldEditor(fieldConfig.name);
+							const editorLines = editor.render(innerWidth - 2);
+							const maxLines = fieldActive ? 5 : 2;
+							for (const line of editorLines.slice(0, maxLines)) {
+								lines.push(row((fieldActive ? "  " : theme.fg("muted", "  ")) + line));
+							}
+							if (editorLines.length > maxLines) {
+								lines.push(row(theme.fg("dim", `    ... ${editorLines.length - maxLines} more`)));
+							}
+							lines.push(divider());
+						}
+
+						// Body field
+						const bodyActive = currentField === "body";
+						const bodyText = bodyEditor.getText().trim();
+						lines.push(row(fieldLabel("Body:", bodyActive, "JSON - auto-merged")));
+						if (bodyActive) {
+							const bodyLines = bodyEditor.render(innerWidth - 2);
+							for (const line of bodyLines.slice(0, 8)) {
+								lines.push(row("  " + line));
+							}
+							if (bodyLines.length > 8) {
+								lines.push(row(theme.fg("dim", `    ... ${bodyLines.length - 8} more lines`)));
+							}
+						} else {
+							const preview = bodyText ? bodyText.replace(/\s+/g, " ").slice(0, innerWidth - 8) : "(empty)";
+							lines.push(row(theme.fg("dim", "  " + preview)));
+						}
+						lines.push(divider());
+
+						// Headers field
+						const headersActive = currentField === "headers";
+						const headersText = headersEditor.getText().trim();
+						lines.push(row(fieldLabel("Headers:", headersActive, "optional")));
+						if (headersActive) {
+							const headerLines = headersEditor.render(innerWidth - 2);
+							for (const line of headerLines) {
+								lines.push(row("  " + line));
+							}
+						} else {
+							const preview = headersText ? headersText.split("\n")[0] : "(none)";
+							lines.push(row(theme.fg("dim", "  " + preview)));
+						}
+
+					} else {
+						// CUSTOM MODE
+						const methodActive = customField === "method";
+						const methodButtons = METHODS.map((m, i) => {
+							const isSelected = i === methodIndex;
+							if (isSelected && methodActive) {
+								return theme.bg("selectedBg", theme.fg("text", ` ${m} `));
+							} else if (isSelected) {
+								return theme.fg("accent", `[${m}]`);
+							} else {
+								return theme.fg("dim", ` ${m} `);
+							}
+						}).join(" ");
+						lines.push(row(fieldLabel("Method:", methodActive) + "  " + methodButtons));
+						lines.push(divider());
+
+						const urlActive = customField === "url";
+						lines.push(row(fieldLabel("URL:", urlActive, "@endpoint or full URL")));
+						const urlLines = urlEditor.render(innerWidth - 2);
+						for (const line of urlLines) {
+							lines.push(row((urlActive ? "  " : theme.fg("muted", "  ")) + line));
+						}
+
+						if (method === "POST" || method === "PUT" || method === "PATCH") {
+							lines.push(divider());
+							const bodyActive = customField === "body";
+							lines.push(row(fieldLabel("Body:", bodyActive, "JSON")));
+							const bodyLines = bodyEditor.render(innerWidth - 2);
+							const maxLines = bodyActive ? 10 : 3;
+							for (const line of bodyLines.slice(0, maxLines)) {
+								lines.push(row((bodyActive ? "  " : theme.fg("muted", "  ")) + line));
+							}
+							if (bodyLines.length > maxLines) {
+								lines.push(row(theme.fg("dim", `    ... ${bodyLines.length - maxLines} more`)));
+							}
+						}
+
+						lines.push(divider());
+						const headersActive = customField === "headers";
+						lines.push(row(fieldLabel("Headers:", headersActive, "Name: Value")));
+						const headerLines = headersEditor.render(innerWidth - 2);
+						const maxHeaderLines = headersActive ? 5 : 3;
+						for (const line of headerLines.slice(0, maxHeaderLines)) {
+							lines.push(row((headersActive ? "  " : theme.fg("muted", "  ")) + line));
+						}
+					}
+
+					lines.push(bottomBorder());
+					lines.push("");
+					const shortcuts = [
+						theme.fg("muted", "Tab") + theme.fg("dim", " next"),
+						theme.fg("muted", "Enter") + theme.fg("dim", " send"),
+						theme.fg("muted", "Esc") + theme.fg("dim", " cancel"),
+					];
+					lines.push("  " + shortcuts.join(theme.fg("dim", "  •  ")));
+					lines.push("");
+
+					cachedLines = lines;
+					return lines;
+				}
+
+				return { render, invalidate: () => { cachedLines = undefined; }, handleInput };
+			});
+
+			if (result.cancelled || !result.url) {
+				ctx.ui.notify("Request cancelled", "info");
+				return;
+			}
+
+			// Parse headers
+			const extraHeaders: Record<string, string> = {};
+			if (result.headers) {
+				for (const line of result.headers.split("\n")) {
+					const colonIdx = line.indexOf(":");
+					if (colonIdx > 0) {
+						const key = line.slice(0, colonIdx).trim();
+						const value = line.slice(colonIdx + 1).trim();
+						if (key) extraHeaders[key] = value;
+					}
+				}
+			}
+
+			// Build the task for the subagent
+			config = loadConfig(ctx.cwd);
+			
+			let resolvedUrl = result.url;
+			let endpoint: EndpointConfig | undefined;
+			
+			if (resolvedUrl.startsWith("@")) {
+				const endpointName = resolvedUrl.slice(1);
+				endpoint = config.endpoints?.find((e) => e.name === endpointName);
+			}
+
+			const method = endpoint?.method || result.method;
+			let task = `${method} ${result.url}`;
+			
+			if (result.body) {
+				task += ` with body ${result.body}`;
+			}
+			
+			const headerEntries = Object.entries(extraHeaders);
+			if (headerEntries.length > 0) {
+				task += ` with headers: ${headerEntries.map(([k, v]) => `${k}: ${v}`).join(", ")}`;
+			}
+
+			// Delegate to api-tester subagent
+			pi.sendUserMessage(`Use subagent api-tester to test: ${task}`);
 		},
 	});
 
