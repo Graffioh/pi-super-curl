@@ -256,7 +256,7 @@ Capture logs after a request completes using `/scurl-log`. This is useful for de
 {
   "customLogging": {
     "enabled": true,
-    "outputDir": "~/Desktop/morphic-generations",
+    "outputDir": "~/Desktop/api-generations",
     "logs": {
       "backend": "/tmp/generation-output.txt",
       "workflow": "apps/orcrust/.next/dev/logs/next-development.log"

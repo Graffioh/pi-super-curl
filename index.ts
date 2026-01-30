@@ -89,7 +89,7 @@ interface TemplateConfig {
 	fields?: TemplateFieldConfig[]; // User-defined input fields
 }
 
-// Parsed SSE result for Morphic-style responses
+// Parsed SSE result for streaming responses
 interface SSEOutput {
 	file_type: string;
 	width: number;
@@ -111,7 +111,7 @@ interface SSEParseResult {
 // Custom logging configuration for project-specific generation output
 interface CustomLoggingConfig {
 	enabled: boolean;
-	outputDir: string; // e.g., "~/Desktop/morphic-generations"
+	outputDir: string; // e.g., "~/Desktop/api-generations"
 	logs?: Record<string, string>; // Map of log name to path, e.g., { "backend": "/tmp/output.txt", "workflow": "apps/logs/dev.log" }
 	postScript?: string; // Optional path to custom post-processing script (receives output dir as argument)
 }
@@ -538,7 +538,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 		return obj;
 	}
 
-	// Parse SSE stream for Morphic-style responses
+	// Parse SSE stream for streaming responses
 	function parseSSEResponse(rawResponse: string): SSEParseResult {
 		const result: SSEParseResult = {
 			responseText: "",

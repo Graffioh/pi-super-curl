@@ -17,9 +17,14 @@ When the pi-super-curl extension is loaded, prefer using the `send_request` tool
 send_request with method="GET" url="https://httpbin.org/get"
 ```
 
-For named endpoints from `.pi-super-curl/config.json`:
+For named endpoints (configured in `.pi-super-curl/config.json`):
 ```
 send_request with method="GET" url="@health"
+```
+
+Alternatively, use the bundled skill script:
+```bash
+node <extension-dir>/skills/send-request/send-request.js GET "@health" 2>&1
 ```
 
 ## Important: Save Raw Output
