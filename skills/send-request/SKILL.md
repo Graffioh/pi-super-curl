@@ -6,63 +6,69 @@ description: Send HTTP requests with automatic configuration and authentication.
 # Send Request Skill
 
 Sends HTTP requests with:
-- **From config**: baseUrl, auth, headers (loaded from `.pi-super-curl/config.json`)
+- **Config-based**: baseUrl, auth, headers (from `.pi-super-curl/config.json`)
 - **Named endpoints**: Quick access via `@endpoint-name`
-- **Response saving**: Optional save to `~/Desktop/api-responses/`
+- **Template variables**: `{{uuid}}`, `{{uuidv7}}`, `{{env.VAR}}`, `{{timestamp}}`
+- **JWT auth**: Auto-generates tokens with configurable payload
+- **Env resolution**: `$VAR` syntax for secrets in config
 
 ## Usage
 
-When invoked via the `/skill:send-request` command, the user provides the request details in the arguments.
-
-**IMPORTANT**: Use EXACTLY the request details provided by the user. Do NOT modify the URL, method, or body unless explicitly asked.
-
-## Execution
-
-Run the `send-request.js` script with the request parameters:
+Run the `send-request.cjs` script with request parameters:
 
 ```bash
-node <skill-dir>/send-request.js <METHOD> "<URL>" [options] 2>&1
+# First, find the script path
+SCRIPT=$(find ~/.pi -path "*/pi-super-curl/skills/send-request/send-request.cjs" 2>/dev/null | head -1)
+
+# Then use it
+node "$SCRIPT" <METHOD> "<URL>" [options] 2>&1
 ```
 
 **Parameters:**
 - `METHOD`: GET, POST, PUT, PATCH, DELETE
 - `URL`: Full URL or `@endpoint-name` from config
-- `--body '{"key": "value"}'`: Request body (JSON)
+- `--body '{"key": "value"}'`: Request body (JSON, supports templates)
 - `--header 'Name: Value'`: Custom header (repeatable)
 - `--save`: Save response to `~/Desktop/api-responses/`
+- `--stream`: Stream SSE responses
 
 **Examples:**
 
 ```bash
 # Simple GET request
-node <skill-dir>/send-request.js GET "https://httpbin.org/get" 2>&1
+node "$SCRIPT" GET "https://httpbin.org/get" 2>&1
 
-# POST with JSON body
-node <skill-dir>/send-request.js POST "https://httpbin.org/post" --body '{"name": "test", "value": 123}' 2>&1
+# POST with JSON body and templates
+node "$SCRIPT" POST "@chat" --body '{"id": "{{uuidv7}}", "user": "{{env.USER_ID}}"}' 2>&1
 
 # Named endpoint from config
-node <skill-dir>/send-request.js GET "@health" 2>&1
+node "$SCRIPT" GET "@health" 2>&1
 
 # With custom header
-node <skill-dir>/send-request.js GET "https://api.example.com/data" --header "X-Custom: value" 2>&1
-
-# Save response to file
-node <skill-dir>/send-request.js GET "https://api.example.com/large" --save 2>&1
+node "$SCRIPT" GET "https://api.example.com/data" --header "X-Custom: value" 2>&1
 ```
 
 ## Configuration
 
-The script reads `.pi-super-curl/config.json` from the current directory or parent directories:
+The script reads `.pi-super-curl/config.json` from the current directory (walking up) or home directory:
 
 ```json
 {
-  "baseUrl": "https://api.example.com",
+  "baseUrl": "$API_BASE_URL",
+  "envFile": ".env",
   "auth": {
-    "type": "bearer",
-    "token": "$API_TOKEN"
+    "type": "jwt",
+    "secret": "$JWT_SECRET",
+    "algorithm": "HS256",
+    "expiresIn": 3600,
+    "payload": {
+      "user_id": "{{env.USER_ID}}",
+      "role": "authenticated"
+    }
   },
   "headers": {
-    "X-Custom-Header": "value"
+    "Content-Type": "application/json",
+    "X-Org-Id": "{{env.ORG_ID}}"
   },
   "endpoints": [
     {
@@ -71,22 +77,58 @@ The script reads `.pi-super-curl/config.json` from the current directory or pare
       "method": "GET"
     },
     {
-      "name": "users",
-      "url": "/v1/users",
+      "name": "chat",
+      "url": "/api/chat",
       "method": "POST",
-      "defaultBody": {"role": "user"}
+      "defaultBody": {
+        "chat_id": "{{uuidv7}}",
+        "workspace_id": "{{env.WORKSPACE_ID}}"
+      }
     }
   ]
 }
 ```
 
-Values starting with `$` are resolved from environment variables.
+## Template Variables
+
+| Template | Description |
+|----------|-------------|
+| `{{uuid}}`, `{{uuidv4}}` | Random UUID v4 |
+| `{{uuidv7}}` | Time-ordered UUID v7 |
+| `{{timestamp}}` | Unix timestamp (seconds) |
+| `{{timestamp_ms}}` | Unix timestamp (ms) |
+| `{{date}}` | ISO date string |
+| `{{env.VAR}}` or `{{$VAR}}` | Environment variables |
+
+## Environment Resolution
+
+Two syntaxes for different contexts:
+
+| Syntax | Use in | Example |
+|--------|--------|---------|
+| `$VAR` | `baseUrl`, `auth.secret`, `auth.token` | `"baseUrl": "$API_URL"` |
+| `{{env.VAR}}` | URLs, headers, body, JWT payload | `"user_id": "{{env.USER_ID}}"` |
 
 ## Authentication Types
 
 ### Bearer Token
 ```json
 {"type": "bearer", "token": "$MY_API_TOKEN"}
+```
+
+### JWT (auto-generated)
+```json
+{
+  "type": "jwt",
+  "secret": "$JWT_SECRET",
+  "algorithm": "HS256",
+  "expiresIn": 3600,
+  "payload": {
+    "user_id": "{{env.USER_ID}}",
+    "email": "{{env.EMAIL}}",
+    "role": "authenticated"
+  }
+}
 ```
 
 ### API Key
@@ -99,24 +141,11 @@ Values starting with `$` are resolved from environment variables.
 {"type": "basic", "username": "$USER", "password": "$PASS"}
 ```
 
-## Output Format
+## Output
 
 The script outputs:
 1. `[INFO]` lines to stderr (method, URL, timing)
 2. Response body to stdout
-3. `[INFO] Request completed successfully` on success
-4. `[ERROR]` on failure
-
-## Output Directory
-
-When `--save` is used, responses are saved to:
-```
-~/Desktop/api-responses/response_<timestamp>_<path>.<ext>
-```
-
-## Troubleshooting
-
-- **Connection refused**: Check the URL and that the server is running
-- **401 Unauthorized**: Check auth config in `.pi-super-curl/config.json`
-- **Endpoint not found**: Run with `@name` requires config with matching endpoint
-- **Timeout**: Default is 30 seconds, server may be slow
+3. Raw response saved to `/tmp/generation-output.txt` (for `/scurl-log`)
+4. `[INFO] Request completed successfully` on success
+5. `[ERROR]` on failure

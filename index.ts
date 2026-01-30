@@ -160,6 +160,48 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 	let config: SuperCurlConfig = {};
 	let configDir: string = ""; // Directory where config was loaded from
 
+	// Auto-setup: Create skill and agent symlinks if they don't exist
+	function setupSymlinks() {
+		const piSkillsDir = path.join(os.homedir(), ".pi", "agent", "skills");
+		const piAgentsDir = path.join(os.homedir(), ".pi", "agent", "agents");
+		
+		// Find the extension directory (where this script is running from)
+		const extensionDir = path.dirname(new URL(import.meta.url).pathname);
+		
+		// Ensure directories exist
+		if (!fs.existsSync(piSkillsDir)) {
+			fs.mkdirSync(piSkillsDir, { recursive: true });
+		}
+		if (!fs.existsSync(piAgentsDir)) {
+			fs.mkdirSync(piAgentsDir, { recursive: true });
+		}
+		
+		// Create skill symlink: ~/.pi/agent/skills/send-request -> extension/skills/send-request
+		const skillSource = path.join(extensionDir, "skills", "send-request");
+		const skillTarget = path.join(piSkillsDir, "send-request");
+		if (fs.existsSync(skillSource) && !fs.existsSync(skillTarget)) {
+			try {
+				fs.symlinkSync(skillSource, skillTarget, "dir");
+			} catch (e) {
+				// Ignore errors (e.g., permission denied)
+			}
+		}
+		
+		// Create agent symlink: ~/.pi/agent/agents/api-tester.md -> extension/agents/api-tester.md
+		const agentSource = path.join(extensionDir, "agents", "api-tester.md");
+		const agentTarget = path.join(piAgentsDir, "api-tester.md");
+		if (fs.existsSync(agentSource) && !fs.existsSync(agentTarget)) {
+			try {
+				fs.symlinkSync(agentSource, agentTarget, "file");
+			} catch (e) {
+				// Ignore errors
+			}
+		}
+	}
+	
+	// Run setup on extension load
+	setupSymlinks();
+
 	// Load configuration
 	function loadConfig(cwd: string): SuperCurlConfig {
 		// Config location: .pi-super-curl/config.json
@@ -1741,16 +1783,29 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					: path.resolve(configDir, config.customLogging.postScript);
 
 				if (fs.existsSync(scriptPath)) {
+					// Show processing indicator while script runs
+					ctx.ui.notify("Processing... (downloading from GCS)", "info");
+					
 					try {
 						const { execSync } = require("child_process");
 						// Pass output directory as argument, run from cwd
 						execSync(`"${scriptPath}" "${outputDir}"`, {
 							cwd: ctx.cwd,
 							stdio: "pipe",
-							timeout: 60000, // 1 minute timeout
+							timeout: 120000, // 2 minute timeout for GCS downloads
 						});
 						postScriptResult = "\n  Post-script: ✓ executed";
-					} catch (err) {
+					} catch (err: any) {
+						// Check if it's "already processed" (exit code 2)
+						if (err?.status === 2) {
+							ctx.ui.notify(
+								"⚠️ Log already processed\n" +
+								"  This request was already logged.\n" +
+								"  Run a new /scurl request first.",
+								"warning"
+							);
+							return; // Exit early, don't show success message
+						}
 						postScriptResult = `\n  Post-script: ✗ ${err instanceof Error ? err.message : "failed"}`;
 					}
 				} else {

@@ -26,12 +26,36 @@ pi super curl gives you a Postman-like request builder right in your coding agen
 pi install npm:pi-super-curl
 ```
 
+### Auto-Setup
+
+When the extension loads, it automatically creates symlinks for:
+- **`send-request` skill** → `~/.pi/agent/skills/send-request/`
+- **`api-tester` agent** → `~/.pi/agent/agents/api-tester.md`
+
+This enables the `api-tester` subagent to use the `send-request` skill for reliable HTTP requests with proper UUID generation, JWT auth, and template variable resolution.
+
+### Manual Setup (if auto-setup fails)
+
+If the symlinks weren't created (e.g., permissions), create them manually:
+
+```bash
+# Find where pi-super-curl was installed
+EXT_DIR=$(find ~/.pi -path "*/pi-super-curl/skills" -type d 2>/dev/null | head -1 | sed 's|/skills||')
+
+# Create skill symlink
+ln -s "$EXT_DIR/skills/send-request" ~/.pi/agent/skills/send-request
+
+# Create agent symlink  
+ln -s "$EXT_DIR/agents/api-tester.md" ~/.pi/agent/agents/api-tester.md
+```
+
 ## Quick Start
 
 1. Create `.pi-super-curl/` directory in your project:
 
 ```
 your-project/
+├── .env                     # Environment variables (secrets, IDs)
 └── .pi-super-curl/
     ├── config.json          # Configuration
     └── my-script.js         # Custom post-processing scripts (optional)
@@ -41,10 +65,16 @@ your-project/
 
 ```json
 {
-  "baseUrl": "https://api.example.com",
+  "baseUrl": "$API_BASE_URL",
+  "envFile": ".env",
   "auth": {
-    "type": "bearer",
-    "token": "$API_TOKEN"
+    "type": "jwt",
+    "secret": "$JWT_SECRET",
+    "expiresIn": 3600,
+    "payload": {
+      "user_id": "{{env.USER_ID}}",
+      "role": "authenticated"
+    }
   },
   "endpoints": [
     {
@@ -242,10 +272,27 @@ Dynamic values in URLs, headers, and body:
 
 ### Environment File
 
+Load environment variables from a `.env` file:
+
 ```json
 {
   "envFile": ".env"
 }
+```
+
+**Two syntaxes for env vars:**
+
+| Syntax | Use in | Example |
+|--------|--------|---------|
+| `$VAR` | `baseUrl`, `auth.secret`, `auth.token` | `"baseUrl": "$API_URL"` |
+| `{{env.VAR}}` or `{{$VAR}}` | URLs, headers, body, JWT payload | `"user_id": "{{env.USER_ID}}"` |
+
+Example `.env` file:
+```bash
+API_BASE_URL=http://localhost:3000
+JWT_SECRET=your-secret-key
+USER_ID=user-123
+ORG_ID=org-456
 ```
 
 ### Custom Logging (Project-Specific)
@@ -332,7 +379,7 @@ const outputDir = process.argv[2];
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `baseUrl` | Base URL for relative paths | - |
+| `baseUrl` | Base URL for relative paths (supports `$VAR` env syntax) | - |
 | `timeout` | Request timeout in ms | 30000 |
 | `envFile` | Path to .env file | - |
 | `auth` | Authentication config | - |

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Send HTTP Request Script
+ * Send HTTP Request Script for pi-super-curl
  * 
  * Usage: node send-request.js <method> <url> [options]
  * 
@@ -10,6 +10,12 @@
  *   --save                       Save response to file
  *   --stream                     Stream SSE responses
  *   --config <path>              Config file path
+ * 
+ * Features:
+ *   - Template variables: {{uuid}}, {{uuidv7}}, {{timestamp}}, {{env.VAR}}, {{$VAR}}
+ *   - Environment resolution: $VAR in baseUrl, auth.secret, auth.token
+ *   - JWT auth: auto-generates tokens with configurable payload
+ *   - Named endpoints: @endpoint-name from config
  * 
  * Examples:
  *   node send-request.js GET https://api.example.com/users
@@ -22,6 +28,7 @@ const path = require('path');
 const os = require('os');
 const https = require('https');
 const http = require('http');
+const crypto = require('crypto');
 
 // Output directory for saved responses
 const OUTPUT_DIR = path.join(os.homedir(), 'Desktop', 'api-responses');
@@ -102,14 +109,25 @@ function loadConfig(configPath) {
         const content = fs.readFileSync(configFile, 'utf-8');
         console.error(`[INFO] Loaded config from ${configFile}`);
         
-        // Also load .env file from same directory if exists
-        const configDir = path.dirname(configFile);
-        const envFile = path.join(path.dirname(configDir), '.env');
-        if (fs.existsSync(envFile)) {
-          loadEnvFile(envFile);
+        const cfg = JSON.parse(content);
+        
+        // Load envFile if specified
+        if (cfg.envFile) {
+          const configDir = path.dirname(path.dirname(configFile)); // Go up from .pi-super-curl/
+          let envPath = cfg.envFile;
+          if (!path.isAbsolute(envPath)) {
+            if (envPath.startsWith('~')) {
+              envPath = path.join(os.homedir(), envPath.slice(1));
+            } else {
+              envPath = path.join(configDir, envPath);
+            }
+          }
+          if (fs.existsSync(envPath)) {
+            loadEnvFile(envPath);
+          }
         }
         
-        return JSON.parse(content);
+        return cfg;
       } catch (e) {
         console.error(`[WARN] Failed to parse ${configFile}: ${e.message}`);
       }
@@ -147,13 +165,158 @@ function loadEnvFile(envPath) {
   }
 }
 
+// Generate UUIDv4
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+// Generate UUIDv7 (timestamp-based UUID)
+function generateUUIDv7() {
+  const timestamp = Date.now();
+  const timestampHex = timestamp.toString(16).padStart(12, '0');
+  const randomBytes = () => Math.floor(Math.random() * 16).toString(16);
+  const randomHex = (len) => Array.from({ length: len }, randomBytes).join('');
+  
+  // UUIDv7 format: tttttttt-tttt-7xxx-yxxx-xxxxxxxxxxxx
+  const uuid = [
+    timestampHex.slice(0, 8),
+    timestampHex.slice(8, 12),
+    '7' + randomHex(3),
+    ((parseInt(randomHex(1), 16) & 0x3) | 0x8).toString(16) + randomHex(3),
+    randomHex(12)
+  ].join('-');
+  
+  return uuid;
+}
+
 // Resolve environment variables (values starting with $)
 function resolveEnvValue(value) {
   if (!value) return undefined;
-  if (value.startsWith('$')) {
+  if (typeof value === 'string' && value.startsWith('$')) {
     return process.env[value.slice(1)];
   }
   return value;
+}
+
+// Process templates in a string: {{env.VAR}}, {{uuidv7}}, etc.
+function processTemplates(str) {
+  if (typeof str !== 'string') return str;
+  
+  return str.replace(/\{\{([^}]+)\}\}/g, (match, expr) => {
+    const trimmed = expr.trim();
+    
+    // {{uuid}} or {{uuidv4}} - random UUID v4
+    if (trimmed === 'uuid' || trimmed === 'uuidv4') {
+      return generateUUID();
+    }
+    
+    // {{uuidv7}} - time-ordered UUID v7
+    if (trimmed === 'uuidv7') {
+      return generateUUIDv7();
+    }
+    
+    // {{timestamp}} - Unix timestamp in seconds
+    if (trimmed === 'timestamp') {
+      return Math.floor(Date.now() / 1000).toString();
+    }
+    
+    // {{timestamp_ms}} - Unix timestamp in milliseconds
+    if (trimmed === 'timestamp_ms') {
+      return Date.now().toString();
+    }
+    
+    // {{date}} - ISO date string
+    if (trimmed === 'date') {
+      return new Date().toISOString();
+    }
+    
+    // {{env.VAR_NAME}} - environment variable
+    if (trimmed.startsWith('env.')) {
+      const varName = trimmed.slice(4);
+      return process.env[varName] || match;
+    }
+    
+    // {{$VAR_NAME}} - also support this format
+    if (trimmed.startsWith('$')) {
+      const varName = trimmed.slice(1);
+      return process.env[varName] || match;
+    }
+    
+    return match;
+  });
+}
+
+// Recursively process templates in an object/array
+function processTemplatesDeep(obj) {
+  if (typeof obj === 'string') {
+    return processTemplates(obj);
+  }
+  if (Array.isArray(obj)) {
+    return obj.map(processTemplatesDeep);
+  }
+  if (obj && typeof obj === 'object') {
+    const result = {};
+    for (const [key, value] of Object.entries(obj)) {
+      result[key] = processTemplatesDeep(value);
+    }
+    return result;
+  }
+  return obj;
+}
+
+// Simple base64url encoding
+function base64url(str) {
+  return Buffer.from(str)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+}
+
+// Generate JWT token
+function generateJWT(auth) {
+  const secret = resolveEnvValue(auth.secret);
+  if (!secret) {
+    console.error('[WARN] JWT secret not found');
+    return null;
+  }
+
+  const algorithm = auth.algorithm || 'HS256';
+  const expiresIn = auth.expiresIn || 3600;
+  const now = Math.floor(Date.now() / 1000);
+
+  // Process templates in payload
+  const payload = processTemplatesDeep(auth.payload || {});
+  payload.iat = now;
+  payload.exp = now + expiresIn;
+
+  const header = { alg: algorithm, typ: 'JWT' };
+  const headerB64 = base64url(JSON.stringify(header));
+  const payloadB64 = base64url(JSON.stringify(payload));
+  const signatureInput = `${headerB64}.${payloadB64}`;
+
+  let hmacAlg;
+  if (algorithm === 'HS256') hmacAlg = 'sha256';
+  else if (algorithm === 'HS384') hmacAlg = 'sha384';
+  else if (algorithm === 'HS512') hmacAlg = 'sha512';
+  else {
+    console.error(`[WARN] Unsupported JWT algorithm: ${algorithm}`);
+    return null;
+  }
+
+  const signature = crypto
+    .createHmac(hmacAlg, secret)
+    .update(signatureInput)
+    .digest('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  return `${signatureInput}.${signature}`;
 }
 
 // Build auth header based on config
@@ -165,6 +328,13 @@ function buildAuthHeader(auth) {
   switch (auth.type) {
     case 'bearer': {
       const token = resolveEnvValue(auth.token);
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`;
+      }
+      break;
+    }
+    case 'jwt': {
+      const token = generateJWT(auth);
       if (token) {
         headers['Authorization'] = `Bearer ${token}`;
       }
@@ -217,7 +387,7 @@ function saveResponse(response, contentType, url) {
 
 // Make HTTP request
 async function makeRequest(options) {
-  const { method, url, headers, body, stream } = options;
+  const { method, url, headers, body, stream, timeout } = options;
 
   return new Promise((resolve, reject) => {
     const parsedUrl = new URL(url);
@@ -270,8 +440,9 @@ async function makeRequest(options) {
       reject(e);
     });
 
-    // Set timeout
-    req.setTimeout(30000, () => {
+    // Set timeout (default 30s, configurable)
+    const timeoutMs = timeout || 30000;
+    req.setTimeout(timeoutMs, () => {
       req.destroy();
       reject(new Error('Request timeout'));
     });
@@ -298,6 +469,17 @@ Options:
   --save                       Save response to file
   --stream                     Stream SSE responses
   --config <path>              Config file path
+
+Template Variables (in body, headers, URLs):
+  {{uuid}}, {{uuidv4}}         Random UUID v4
+  {{uuidv7}}                   Time-ordered UUID v7
+  {{timestamp}}                Unix timestamp (seconds)
+  {{timestamp_ms}}             Unix timestamp (milliseconds)
+  {{date}}                     ISO date string
+  {{env.VAR}} or {{$VAR}}      Environment variable
+
+Config Values (baseUrl, auth.secret, auth.token):
+  $VAR                         Resolve from environment
 
 Examples:
   node send-request.js GET https://httpbin.org/get
@@ -336,9 +518,10 @@ Examples:
       if (body) {
         try {
           const parsedBody = JSON.parse(body);
-          body = JSON.stringify({ ...endpoint.defaultBody, ...parsedBody });
+          // Deep merge: provided body overrides defaultBody
+          body = JSON.stringify(deepMerge(endpoint.defaultBody, parsedBody));
         } catch {
-          // Keep body as-is
+          // Keep body as-is if not valid JSON
         }
       } else {
         body = JSON.stringify(endpoint.defaultBody);
@@ -349,12 +532,30 @@ Examples:
   // Build full URL with baseUrl
   if (!url.startsWith('http://') && !url.startsWith('https://')) {
     if (config.baseUrl) {
-      url = `${config.baseUrl.replace(/\/$/, '')}/${url.replace(/^\//, '')}`;
+      // Resolve env vars in baseUrl (supports $VAR format)
+      let resolvedBaseUrl = resolveEnvValue(config.baseUrl) || config.baseUrl;
+      // Also process {{env.VAR}} templates
+      resolvedBaseUrl = processTemplates(resolvedBaseUrl);
+      url = `${resolvedBaseUrl.replace(/\/$/, '')}/${url.replace(/^\//, '')}`;
     } else {
       console.error('[ERROR] URL must be absolute or configure baseUrl in .pi-super-curl/config.json');
       process.exit(1);
     }
   }
+
+  // Process templates in body
+  if (body) {
+    try {
+      const parsedBody = JSON.parse(body);
+      body = JSON.stringify(processTemplatesDeep(parsedBody));
+    } catch {
+      // If not JSON, process as string
+      body = processTemplates(body);
+    }
+  }
+
+  // Process templates in headers
+  finalHeaders = processTemplatesDeep(finalHeaders);
 
   // Add auth headers
   const auth = endpoint?.auth || config.auth;
@@ -374,6 +575,7 @@ Examples:
       headers: finalHeaders,
       body,
       stream: parsed.stream,
+      timeout: config.timeout,
     });
 
     const isSuccess = response.status >= 200 && response.status < 300;
@@ -396,6 +598,13 @@ Examples:
       console.log(output);
     }
 
+    // Save raw output to /tmp for scurl-log
+    try {
+      fs.writeFileSync('/tmp/generation-output.txt', response.body);
+    } catch {
+      // Ignore
+    }
+
     // Save if requested
     if (parsed.save) {
       const filepath = saveResponse(output, response.contentType, url);
@@ -409,6 +618,23 @@ Examples:
     console.error(`[ERROR] Request failed: ${error.message}`);
     process.exit(1);
   }
+}
+
+// Deep merge objects (source overrides target)
+function deepMerge(target, source) {
+  const result = { ...target };
+  for (const key of Object.keys(source)) {
+    if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+      if (target[key] && typeof target[key] === 'object' && !Array.isArray(target[key])) {
+        result[key] = deepMerge(target[key], source[key]);
+      } else {
+        result[key] = source[key];
+      }
+    } else {
+      result[key] = source[key];
+    }
+  }
+  return result;
 }
 
 main();
