@@ -1,6 +1,6 @@
 # pi-super-curl
 
-A [pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl`.
+A [pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl` by using your coding agent capabilities.
 
 https://github.com/user-attachments/assets/612542b1-5fd0-4cd5-a02e-9384cab9cc98
 
@@ -12,9 +12,9 @@ API testing during development is repetitive. You're constantly:
 - Copying auth tokens between tools
 - Regenerating expired JWTs
 - Retyping the same endpoints
-- Losing context switching between Postman and your terminal
+- Coding agent don't have request <-> response context if called externally
 
-pi super curl gives you a Postman-like request builder right in your terminal:
+pi super curl gives you a Postman-like request builder right in your coding agent:
 
 ```
 /scurl
@@ -53,17 +53,12 @@ pi install npm:pi-super-curl
 
 ### `/scurl`
 
-Opens the interactive request builder UI. Build your request visually, then execute it directly.
+Opens the interactive request builder UI. Build your request visually, then delegates execution to the `api-tester` subagent for a concise summary.
 
-- **Ctrl+T** - Switch to template mode (quick access to configured endpoints)
+- **Ctrl+T** - Switch between Default and Template modes
 - **Tab** - Navigate between fields
+- **↑↓** - Change options (endpoints, methods) or scroll body content
 - **Enter** - Send request
-
-### `/scurl-agent`
-
-Same UI as `/scurl`, but delegates execution to the `api-tester` subagent. 
-
-This runs on `claude-haiku-4-5` and returns a concise summary without cluttering your main conversation context. Perfect for quick API checks.
 
 ## Configuration
 
@@ -155,7 +150,7 @@ Dynamic values in URLs, headers, and body:
 | `{{timestamp}}` | Unix timestamp (seconds) |
 | `{{timestamp_ms}}` | Unix timestamp (ms) |
 | `{{date}}` | ISO date string |
-| `{{env.VAR}}` or `{{$VAR}}` | Environment variable |
+| `{{env.VAR}}` or `{{$VAR}}` | Environment variables |
 
 ### Environment File
 

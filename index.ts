@@ -665,1147 +665,13 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 		}
 	}
 
-	// Register /scurl command - Super Curl request builder
+	// /scurl command - opens UI then delegates to api-tester subagent
 	pi.registerCommand("scurl", {
 		description: "Open Super Curl request builder (Ctrl+T for templates)",
 		handler: async (_args, ctx) => {
 			config = loadConfig(ctx.cwd);
 
 			// Build template list for template mode
-			// Templates are preferred, but fall back to endpoints if no templates defined
-			interface TemplateOption {
-				name: string;
-				label: string;
-				description?: string;
-				endpoint?: EndpointConfig;
-				bodyOverrides?: Record<string, unknown>;
-				extraHeaders?: Record<string, string>;
-				fields?: TemplateFieldConfig[];
-			}
-			
-			const templateOptions: TemplateOption[] = [];
-			
-			if (config.templates && config.templates.length > 0) {
-				// Use configured templates
-				for (const tpl of config.templates) {
-					const ep = config.endpoints?.find(e => e.name === tpl.endpoint);
-					templateOptions.push({
-						name: tpl.name,
-						label: tpl.description || `${tpl.name} → @${tpl.endpoint}`,
-						description: tpl.description,
-						endpoint: ep,
-						bodyOverrides: tpl.body,
-						extraHeaders: tpl.headers,
-						fields: tpl.fields,
-					});
-				}
-			} else {
-				// Fall back to endpoints as templates
-				for (const ep of config.endpoints || []) {
-					templateOptions.push({
-						name: ep.name,
-						label: `@${ep.name} (${ep.method || "GET"})`,
-						endpoint: ep,
-					});
-				}
-			}
-
-			const result = await ctx.ui.custom<RequestBuilderResult>((tui, theme, _kb, done) => {
-				// Mode: "template" (quick endpoint + prompt) or "default" (full postman)
-				let mode: "template" | "default" = "default";
-				
-				// State for template mode
-				let endpointIndex = 0;
-				
-				// State for custom mode
-				let methodIndex = 0; // GET by default
-				
-				// Dynamic field editors for template mode (keyed by field name)
-				let fieldEditors: Map<string, Editor> = new Map();
-				
-				// Active field depends on mode
-				// For template mode: "endpoint" | field.name | "body" | "headers"
-				let templateFieldIndex = 0; // Index into getTemplateFields() array
-				type CustomField = "method" | "url" | "body" | "headers";
-				let customField: CustomField = "method";
-				
-				let cachedLines: string[] | undefined;
-
-				// Editor theme
-				const editorTheme: EditorTheme = {
-					borderColor: (s) => theme.fg("accent", s),
-					selectList: {
-						selectedPrefix: (t) => theme.fg("accent", t),
-						selectedText: (t) => theme.fg("accent", t),
-						description: (t) => theme.fg("muted", t),
-						scrollInfo: (t) => theme.fg("dim", t),
-						noMatch: (t) => theme.fg("warning", t),
-					},
-				};
-
-				// Editors
-				const urlEditor = new Editor(tui, editorTheme);
-				const bodyEditor = new Editor(tui, editorTheme);
-				const headersEditor = new Editor(tui, editorTheme);
-
-				// Default field shown when template has no custom fields
-				const defaultPromptField: TemplateFieldConfig = {
-					name: "prompt",
-					label: "",  // No label
-					path: "generation_params.positive_prompt",
-				};
-				
-				// Get the list of navigable fields for current template
-				// Returns: ["endpoint", ...field names..., "body", "headers"]
-				function getTemplateFields(): string[] {
-					const fields = ["endpoint"];
-					const tpl = templateOptions[endpointIndex];
-					if (tpl?.fields && tpl.fields.length > 0) {
-						for (const f of tpl.fields) {
-							fields.push(f.name);
-						}
-					} else {
-						// Default: show prompt field
-						fields.push("prompt");
-					}
-					fields.push("body", "headers");
-					return fields;
-				}
-				
-				// Get field configs for current template (custom or default)
-				function getTemplateFieldConfigs(): TemplateFieldConfig[] {
-					const tpl = templateOptions[endpointIndex];
-					if (tpl?.fields && tpl.fields.length > 0) {
-						return tpl.fields;
-					}
-					return [defaultPromptField];
-				}
-				
-				// Get current template field name
-				function getCurrentTemplateField(): string {
-					const fields = getTemplateFields();
-					return fields[templateFieldIndex] || "endpoint";
-				}
-				
-				// Get or create editor for a field
-				function getFieldEditor(fieldName: string): Editor {
-					if (!fieldEditors.has(fieldName)) {
-						const editor = new Editor(tui, editorTheme);
-						// Set default value if configured
-						const tpl = templateOptions[endpointIndex];
-						const fieldConfig = tpl?.fields?.find(f => f.name === fieldName);
-						if (fieldConfig?.default) {
-							editor.setText(fieldConfig.default);
-						}
-						fieldEditors.set(fieldName, editor);
-					}
-					return fieldEditors.get(fieldName)!;
-				}
-
-				// Custom mode: all fields start empty (no pre-population)
-
-				// Load template (merges endpoint defaultBody with template overrides)
-				function loadTemplate(idx: number) {
-					if (idx < 0 || idx >= templateOptions.length) return;
-					const opt = templateOptions[idx];
-					if (opt.endpoint) {
-						const methodIdx = METHODS.indexOf(opt.endpoint.method || "GET");
-						if (methodIdx >= 0) methodIndex = methodIdx;
-						
-						// Merge endpoint defaultBody with template bodyOverrides
-						let body: Record<string, unknown> = {};
-						if (opt.endpoint.defaultBody) {
-							body = JSON.parse(JSON.stringify(opt.endpoint.defaultBody)); // Deep clone
-						}
-						if (opt.bodyOverrides) {
-							// Deep merge bodyOverrides into body
-							body = deepMerge(body, opt.bodyOverrides);
-						}
-						
-						if (Object.keys(body).length > 0) {
-							bodyEditor.setText(JSON.stringify(body, null, 2));
-						} else {
-							bodyEditor.setText("");
-						}
-						
-						// Set extra headers if defined
-						if (opt.extraHeaders) {
-							const headerLines = Object.entries(opt.extraHeaders)
-								.map(([k, v]) => `${k}: ${v}`)
-								.join("\n");
-							headersEditor.setText(headerLines);
-						} else {
-							headersEditor.setText("");
-						}
-						
-						// Reset field editors and set defaults
-						fieldEditors = new Map();
-						const fieldsToSetup = (opt.fields && opt.fields.length > 0) ? opt.fields : [defaultPromptField];
-						for (const f of fieldsToSetup) {
-							const editor = new Editor(tui, editorTheme);
-							if (f.default) {
-								editor.setText(f.default);
-							}
-							fieldEditors.set(f.name, editor);
-						}
-						
-						// Reset field index to endpoint
-						templateFieldIndex = 0;
-					}
-				}
-				
-				// Deep merge helper
-				function deepMerge(target: Record<string, unknown>, source: Record<string, unknown>): Record<string, unknown> {
-					const result = { ...target };
-					for (const key of Object.keys(source)) {
-						if (source[key] && typeof source[key] === "object" && !Array.isArray(source[key])) {
-							if (target[key] && typeof target[key] === "object" && !Array.isArray(target[key])) {
-								result[key] = deepMerge(target[key] as Record<string, unknown>, source[key] as Record<string, unknown>);
-							} else {
-								result[key] = source[key];
-							}
-						} else {
-							result[key] = source[key];
-						}
-					}
-					return result;
-				}
-
-				// Template is loaded when user switches to template mode via Ctrl+T
-
-				function refresh() {
-					cachedLines = undefined;
-					tui.requestRender();
-				}
-
-				function getActiveEditor(): Editor | null {
-					if (mode === "template") {
-						const currentField = getCurrentTemplateField();
-						if (currentField === "endpoint") return null;
-						if (currentField === "body") return bodyEditor;
-						if (currentField === "headers") return headersEditor;
-						// It's a custom field
-						return getFieldEditor(currentField);
-					} else {
-						switch (customField) {
-							case "url": return urlEditor;
-							case "body": return bodyEditor;
-							case "headers": return headersEditor;
-							default: return null;
-						}
-					}
-				}
-
-				// Set value at a JSON path (e.g., "generation_params.positive_prompt" or "messages[0].content")
-				function setAtPath(obj: Record<string, unknown>, pathStr: string, value: unknown): void {
-					// Parse path into segments, handling both dot notation and array brackets
-					const segments: (string | number)[] = [];
-					const regex = /([^.\[\]]+)|\[(\d+)\]/g;
-					let match;
-					while ((match = regex.exec(pathStr)) !== null) {
-						if (match[1] !== undefined) {
-							segments.push(match[1]); // property name
-						} else if (match[2] !== undefined) {
-							segments.push(parseInt(match[2], 10)); // array index
-						}
-					}
-					
-					let current: unknown = obj;
-					for (let i = 0; i < segments.length - 1; i++) {
-						const seg = segments[i];
-						const nextSeg = segments[i + 1];
-						const currentObj = current as Record<string, unknown>;
-						
-						if (!(seg in currentObj) || typeof currentObj[seg as string] !== "object") {
-							// Create array or object based on next segment type
-							currentObj[seg as string] = typeof nextSeg === "number" ? [] : {};
-						}
-						current = currentObj[seg as string];
-					}
-					
-					const lastSeg = segments[segments.length - 1];
-					(current as Record<string, unknown>)[lastSeg as string] = value;
-				}
-
-				function buildFinalBody(): string {
-					const bodyText = bodyEditor.getText().trim();
-					
-					if (mode === "template") {
-						const fieldConfigs = getTemplateFieldConfigs();
-						
-						try {
-							const body = bodyText ? JSON.parse(bodyText) : {};
-							
-							// Inject each field value at its configured path
-							for (const fieldConfig of fieldConfigs) {
-								if (!fieldConfig.path) continue;
-								const editor = fieldEditors.get(fieldConfig.name);
-								const value = editor?.getText().trim() || "";
-								if (value) {
-									setAtPath(body, fieldConfig.path, value);
-								}
-							}
-							
-							return JSON.stringify(body);
-						} catch {
-							return bodyText;
-						}
-					}
-					
-					return bodyText;
-				}
-
-				function getUrl(): string {
-					if (mode === "template" && templateOptions.length > 0) {
-						const tpl = templateOptions[endpointIndex];
-						// Return the endpoint name (not template name)
-						return `@${tpl.endpoint?.name || tpl.name}`;
-					}
-					return urlEditor.getText().trim();
-				}
-
-				function submit() {
-					done({
-						method: METHODS[methodIndex],
-						url: getUrl(),
-						body: buildFinalBody(),
-						headers: headersEditor.getText().trim(),
-						cancelled: false,
-						endpoint: mode === "template" ? templateOptions[endpointIndex]?.name : undefined,
-					});
-				}
-
-				function handleInput(data: string) {
-					// Escape to cancel
-					if (matchesKey(data, Key.escape)) {
-						done({
-							method: METHODS[methodIndex],
-							url: "",
-							body: "",
-							headers: "",
-							cancelled: true,
-						});
-						return;
-					}
-
-					// Ctrl+T to toggle mode
-					if (matchesKey(data, Key.ctrl("t"))) {
-						if (mode === "template" && templateOptions.length > 0) {
-							mode = "default";
-							customField = "method";
-							// Reset all fields to empty for default mode
-							methodIndex = 0;
-							urlEditor.setText("");
-							bodyEditor.setText("");
-							headersEditor.setText("");
-						} else if (mode === "default" && templateOptions.length > 0) {
-							mode = "template";
-							templateFieldIndex = 0;
-							loadTemplate(endpointIndex);
-						}
-						refresh();
-						return;
-					}
-
-					// Enter or Ctrl+Enter to send (check raw \r and \n too)
-					if (data === "\r" || data === "\n" || matchesKey(data, Key.enter) || matchesKey(data, Key.ctrl("j")) || matchesKey(data, Key.ctrl("enter"))) {
-						submit();
-						return;
-					}
-
-					// Tab to switch fields
-					if (matchesKey(data, Key.tab)) {
-						if (mode === "template") {
-							const fields = getTemplateFields();
-							templateFieldIndex = (templateFieldIndex + 1) % fields.length;
-						} else {
-							// Skip body field for GET method
-							const method = METHODS[methodIndex];
-							const fields: CustomField[] = (method === "GET") 
-								? ["method", "url", "headers"]
-								: ["method", "url", "body", "headers"];
-							const currentIndex = fields.indexOf(customField);
-							customField = fields[(currentIndex + 1) % fields.length];
-						}
-						refresh();
-						return;
-					}
-
-					// Shift+Tab to switch fields backwards
-					if (matchesKey(data, Key.shift("tab"))) {
-						if (mode === "template") {
-							const fields = getTemplateFields();
-							templateFieldIndex = (templateFieldIndex - 1 + fields.length) % fields.length;
-						} else {
-							// Skip body field for GET method
-							const method = METHODS[methodIndex];
-							const fields: CustomField[] = (method === "GET") 
-								? ["method", "url", "headers"]
-								: ["method", "url", "body", "headers"];
-							const currentIndex = fields.indexOf(customField);
-							customField = fields[(currentIndex - 1 + fields.length) % fields.length];
-						}
-						refresh();
-						return;
-					}
-
-					// Handle selector fields
-					if (mode === "template" && getCurrentTemplateField() === "endpoint") {
-						if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
-							endpointIndex = (endpointIndex - 1 + templateOptions.length) % templateOptions.length;
-							loadTemplate(endpointIndex);
-							refresh();
-							return;
-						}
-						if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
-							endpointIndex = (endpointIndex + 1) % templateOptions.length;
-							loadTemplate(endpointIndex);
-							refresh();
-							return;
-						}
-						const num = parseInt(data);
-						if (num >= 1 && num <= templateOptions.length) {
-							endpointIndex = num - 1;
-							loadTemplate(endpointIndex);
-							refresh();
-							return;
-						}
-						return;
-					}
-
-					if (mode === "default" && customField === "method") {
-						if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
-							methodIndex = (methodIndex - 1 + METHODS.length) % METHODS.length;
-							refresh();
-							return;
-						}
-						if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
-							methodIndex = (methodIndex + 1) % METHODS.length;
-							refresh();
-							return;
-						}
-						const num = parseInt(data);
-						if (num >= 1 && num <= METHODS.length) {
-							methodIndex = num - 1;
-							refresh();
-							return;
-						}
-						return;
-					}
-
-					// Pass to active editor
-					const editor = getActiveEditor();
-					if (editor) {
-						editor.handleInput(data);
-						refresh();
-					}
-				}
-
-				function render(width: number): string[] {
-					if (cachedLines) return cachedLines;
-
-					const lines: string[] = [];
-					const boxWidth = Math.min(width - 6, 110);
-					const method = METHODS[methodIndex];
-
-					// Strip ANSI codes to get visible length
-					const visibleLength = (str: string) => str.replace(/\x1b\[[0-9;]*m/g, "").length;
-					
-					// Truncate string to max visible length (accounting for ANSI codes)
-					const truncate = (str: string, maxLen: number): string => {
-						const stripped = str.replace(/\x1b\[[0-9;]*m/g, "");
-						if (stripped.length <= maxLen) return str;
-						
-						// Need to truncate - walk through and count visible chars
-						let visible = 0;
-						let result = "";
-						let i = 0;
-						while (i < str.length && visible < maxLen - 1) {
-							if (str[i] === "\x1b") {
-								// ANSI escape - copy until 'm'
-								const end = str.indexOf("m", i);
-								if (end !== -1) {
-									result += str.slice(i, end + 1);
-									i = end + 1;
-									continue;
-								}
-							}
-							result += str[i];
-							visible++;
-							i++;
-						}
-						return result + "…";
-					};
-					
-					// Pad string to width accounting for ANSI codes
-					const padEnd = (str: string, len: number) => {
-						const visible = visibleLength(str);
-						const padding = Math.max(0, len - visible);
-						return str + " ".repeat(padding);
-					};
-
-					// Box drawing helpers (default terminal color)
-					const innerWidth = boxWidth - 1; // -1 for leading space in row
-					const topBorder = () => `  ┌${"─".repeat(boxWidth)}┐`;
-					const bottomBorder = () => `  └${"─".repeat(boxWidth)}┘`;
-					const divider = () => `  ├${"─".repeat(boxWidth)}┤`;
-					const row = (content: string) => {
-						const padded = " " + truncate(content, innerWidth);
-						return `  │${padEnd(padded, boxWidth)}│`;
-					};
-
-					// Helper for field label with active indicator
-					const fieldLabel = (label: string, active: boolean, hint?: string) => {
-						const indicator = active ? theme.fg("accent", "▸") : " ";
-						const labelStyled = active ? theme.fg("accent", theme.bold(label)) : theme.fg("muted", label);
-						const hintText = hint ? theme.fg("dim", `  ${hint}`) : "";
-						return `${indicator} ${labelStyled}${hintText}`;
-					};
-
-					// Title
-					lines.push("");
-					lines.push(topBorder());
-					const modeIcon = mode === "template" ? "◈" : "◉";
-					const modeLabel = mode === "template" ? "Template" : "Default";
-					lines.push(row(theme.fg("accent", theme.bold(`${modeIcon} Super Curl · ${modeLabel}`))));
-					
-					if (templateOptions.length > 0) {
-						const switchTo = mode === "template" ? "default" : "template";
-						lines.push(row(theme.fg("dim", `Ctrl+T → switch to ${switchTo}`)));
-					}
-					lines.push(divider());
-
-					if (mode === "template") {
-						// TEMPLATE MODE
-						const currentEndpoint = templateOptions[endpointIndex];
-						const currentField = getCurrentTemplateField();
-						const epActive = currentField === "endpoint";
-						
-						// Endpoint selector
-						let epDisplay = "";
-						if (epActive) {
-							epDisplay = theme.bg("selectedBg", theme.fg("text", ` ${currentEndpoint?.label || "none"} `));
-							epDisplay += theme.fg("dim", "  ←→ change");
-						} else {
-							epDisplay = theme.fg("text", currentEndpoint?.label || "none");
-						}
-						lines.push(row(fieldLabel("Endpoint:", epActive) + "  " + epDisplay));
-						lines.push(row(theme.fg("dim", `   Method: ${method}`)));
-						lines.push(divider());
-
-						// Dynamic fields from template config (or default prompt)
-						const tplFields = getTemplateFieldConfigs();
-						for (const fieldConfig of tplFields) {
-							const isActive = currentField === fieldConfig.name;
-							const editor = getFieldEditor(fieldConfig.name);
-							
-							// Only show label row if label is defined
-							if (fieldConfig.label) {
-								lines.push(row(fieldLabel(`${fieldConfig.label}:`, isActive, fieldConfig.hint)));
-							}
-							const fieldLines = editor.render(innerWidth - 2);
-							for (const line of fieldLines) {
-								lines.push(row((isActive ? "  " : theme.fg("muted", "  ")) + line));
-							}
-							lines.push(divider());
-						}
-
-						// Body field
-						const bodyActive = currentField === "body";
-						const bodyText = bodyEditor.getText();
-						lines.push(row(fieldLabel("Body:", bodyActive, "JSON")));
-						if (bodyActive) {
-							const bodyLines = bodyEditor.render(innerWidth - 2);
-							for (const line of bodyLines.slice(0, 8)) {
-								lines.push(row("  " + line));
-							}
-							if (bodyLines.length > 8) {
-								lines.push(row(theme.fg("dim", `    ... ${bodyLines.length - 8} more lines`)));
-							}
-						} else {
-							const preview = bodyText ? bodyText.replace(/\s+/g, " ").slice(0, innerWidth - 8) : "(empty)";
-							lines.push(row(theme.fg("dim", "  " + preview)));
-						}
-						lines.push(divider());
-
-						// Headers field
-						const headersActive = currentField === "headers";
-						const headersText = headersEditor.getText().trim();
-						lines.push(row(fieldLabel("Headers:", headersActive, "optional")));
-						if (headersActive) {
-							const headerLines = headersEditor.render(innerWidth - 2);
-							for (const line of headerLines) {
-								lines.push(row("  " + line));
-							}
-						} else {
-							const preview = headersText ? headersText.split("\n")[0] : "(none)";
-							lines.push(row(theme.fg("dim", "  " + preview)));
-						}
-
-					} else {
-						// CUSTOM MODE
-						
-						// Method selector
-						const methodActive = customField === "method";
-						const methodButtons = METHODS.map((m, i) => {
-							const isSelected = i === methodIndex;
-							if (isSelected && methodActive) {
-								return theme.bg("selectedBg", theme.fg("text", ` ${m} `));
-							} else if (isSelected) {
-								return theme.fg("accent", `[${m}]`);
-							} else {
-								return theme.fg("dim", ` ${m} `);
-							}
-						}).join(" ");
-						lines.push(row(fieldLabel("Method:", methodActive) + "  " + methodButtons));
-						lines.push(divider());
-
-						// URL field
-						const urlActive = customField === "url";
-						lines.push(row(fieldLabel("URL:", urlActive, "@endpoint or full URL")));
-						const urlLines = urlEditor.render(innerWidth - 2);
-						for (const line of urlLines) {
-							lines.push(row((urlActive ? "  " : theme.fg("muted", "  ")) + line));
-						}
-
-						// Body field (only for POST/PUT/PATCH)
-						if (method === "POST" || method === "PUT" || method === "PATCH") {
-							lines.push(divider());
-							const bodyActive = customField === "body";
-							lines.push(row(fieldLabel("Body:", bodyActive, "JSON")));
-							const bodyLines = bodyEditor.render(innerWidth - 2);
-							const maxLines = bodyActive ? 10 : 3;
-							for (const line of bodyLines.slice(0, maxLines)) {
-								lines.push(row((bodyActive ? "  " : theme.fg("muted", "  ")) + line));
-							}
-							if (bodyLines.length > maxLines) {
-								lines.push(row(theme.fg("dim", `    ... ${bodyLines.length - maxLines} more`)));
-							}
-						}
-
-						// Headers field
-						lines.push(divider());
-						const headersActive = customField === "headers";
-						lines.push(row(fieldLabel("Headers:", headersActive, "Name: Value")));
-						const headerLines = headersEditor.render(innerWidth - 2);
-						const maxHeaderLines = headersActive ? 5 : 3;
-						for (const line of headerLines.slice(0, maxHeaderLines)) {
-							lines.push(row((headersActive ? "  " : theme.fg("muted", "  ")) + line));
-						}
-					}
-
-					// Bottom border
-					lines.push(bottomBorder());
-					
-					// Footer shortcuts
-					lines.push("");
-					const shortcuts = [
-						theme.fg("muted", "Tab") + theme.fg("dim", " next"),
-						theme.fg("muted", "Enter") + theme.fg("dim", " send"),
-						theme.fg("muted", "Esc") + theme.fg("dim", " cancel"),
-					];
-					lines.push("  " + shortcuts.join(theme.fg("dim", "  •  ")));
-					lines.push("");
-
-					cachedLines = lines;
-					return lines;
-				}
-
-				return {
-					render,
-					invalidate: () => { cachedLines = undefined; },
-					handleInput,
-				};
-			});
-
-			if (result.cancelled || !result.url) {
-				ctx.ui.notify("Request cancelled", "info");
-				return;
-			}
-
-			// Parse headers from string format "Name: Value\nName2: Value2"
-			const extraHeaders: Record<string, string> = {};
-			if (result.headers) {
-				for (const line of result.headers.split("\n")) {
-					const colonIdx = line.indexOf(":");
-					if (colonIdx > 0) {
-						const key = line.slice(0, colonIdx).trim();
-						const value = line.slice(colonIdx + 1).trim();
-						if (key) extraHeaders[key] = value;
-					}
-				}
-			}
-
-			// Pre-resolve all templates so the skill doesn't need to handle them
-			config = loadConfig(ctx.cwd);
-			
-			// Resolve URL (handle @endpoint and baseUrl)
-			let resolvedUrl = result.url;
-			let endpoint: EndpointConfig | undefined;
-			
-			if (resolvedUrl.startsWith("@")) {
-				const endpointName = resolvedUrl.slice(1);
-				endpoint = config.endpoints?.find((e) => e.name === endpointName);
-				if (endpoint) {
-					resolvedUrl = endpoint.url;
-				}
-			}
-			
-			if (!resolvedUrl.startsWith("http://") && !resolvedUrl.startsWith("https://")) {
-				if (config.baseUrl) {
-					const resolvedBaseUrl = resolveTemplates(config.baseUrl);
-					resolvedUrl = `${resolvedBaseUrl.replace(/\/$/, "")}/${resolvedUrl.replace(/^\//, "")}`;
-				}
-			}
-			resolvedUrl = resolveTemplates(resolvedUrl);
-			
-			// Resolve body (merge with endpoint defaults and resolve templates)
-			let resolvedBody = result.body || "";
-			if (endpoint?.defaultBody) {
-				try {
-					const bodyObj = resolvedBody ? JSON.parse(resolvedBody) : {};
-					const merged = { ...endpoint.defaultBody, ...bodyObj };
-					const resolved = resolveTemplatesInObject(merged);
-					resolvedBody = JSON.stringify(resolved);
-				} catch {
-					resolvedBody = resolveTemplates(resolvedBody);
-				}
-			} else if (resolvedBody) {
-				try {
-					const parsed = JSON.parse(resolvedBody);
-					const resolved = resolveTemplatesInObject(parsed);
-					resolvedBody = JSON.stringify(resolved);
-				} catch {
-					resolvedBody = resolveTemplates(resolvedBody);
-				}
-			}
-			
-			// Resolve headers
-			const allHeaders: Record<string, string> = {
-				...(config.headers || {}),
-				...(endpoint?.headers || {}),
-				...extraHeaders,
-			};
-			const resolvedHeaders: Record<string, string> = {};
-			for (const [key, value] of Object.entries(allHeaders)) {
-				resolvedHeaders[key] = resolveTemplates(value);
-			}
-			
-			// Add auth header
-			const auth = endpoint?.auth || config.auth;
-			if (auth && auth.type !== "none") {
-				Object.assign(resolvedHeaders, buildAuthHeader(auth));
-			}
-			
-			// Format headers for message
-			const headersStr = Object.entries(resolvedHeaders)
-				.map(([k, v]) => `${k}: ${v}`)
-				.join("\n");
-
-			// Build message for LLM with pre-resolved values
-			const method = endpoint?.method || result.method;
-			let message = `Use the send-request skill to ${method} ${resolvedUrl}`;
-			if (resolvedBody) {
-				message += ` with body:\n${resolvedBody}`;
-			}
-			if (headersStr) {
-				message += `\n\nWith headers:\n${headersStr}`;
-			}
-
-			// Send to LLM
-			pi.sendUserMessage(message);
-		},
-	});
-
-	// Core request execution logic (shared by /scurl and send_request tool)
-	interface ExecuteRequestParams {
-		method: string;
-		url: string;
-		body?: string;
-		headers?: Record<string, string>;
-		save?: boolean;
-		cwd: string;
-		onUpdate?: (update: { content: Array<{ type: string; text: string }> }) => void;
-		signal?: AbortSignal;
-	}
-
-	interface ExecuteRequestResult {
-		content: Array<{ type: string; text: string }>;
-		details: Record<string, unknown>;
-		isError?: boolean;
-	}
-
-	async function executeRequest(params: ExecuteRequestParams): Promise<ExecuteRequestResult> {
-		const { method = "GET", headers: extraHeaders = {}, body, save = false, cwd, onUpdate, signal } = params;
-		let url = params.url;
-		const startTime = Date.now();
-
-		config = loadConfig(cwd);
-
-		// Handle named endpoints
-		let endpoint: EndpointConfig | undefined;
-		if (url.startsWith("@")) {
-			const endpointName = url.slice(1);
-			endpoint = config.endpoints?.find((e) => e.name === endpointName);
-			if (!endpoint) {
-				const available = config.endpoints?.map((e) => e.name).join(", ") || "none";
-				return {
-					content: [{ type: "text", text: `Endpoint "@${endpointName}" not found. Available: ${available}` }],
-					details: { error: true },
-					isError: true,
-				};
-			}
-			url = endpoint.url;
-		}
-
-		// Build full URL (resolve templates in baseUrl first)
-		if (!url.startsWith("http://") && !url.startsWith("https://")) {
-			if (config.baseUrl) {
-				const resolvedBaseUrl = resolveTemplates(config.baseUrl);
-				url = `${resolvedBaseUrl.replace(/\/$/, "")}/${url.replace(/^\//, "")}`;
-			} else {
-				return {
-					content: [{ type: "text", text: "URL must be absolute or configure baseUrl in .super-curl.json" }],
-					details: { error: true },
-					isError: true,
-				};
-			}
-		}
-
-		// Build headers and resolve templates
-		const rawHeaders: Record<string, string> = {
-			...(config.headers || {}),
-			...(endpoint?.headers || {}),
-			...extraHeaders,
-		};
-		const finalHeaders: Record<string, string> = {};
-		for (const [key, value] of Object.entries(rawHeaders)) {
-			finalHeaders[key] = resolveTemplates(value);
-		}
-
-		// Add auth
-		const auth = endpoint?.auth || config.auth;
-		if (auth && auth.type !== "none") {
-			Object.assign(finalHeaders, buildAuthHeader(auth));
-		}
-
-		// Add content-type for body
-		if (body && !finalHeaders["Content-Type"]) {
-			finalHeaders["Content-Type"] = "application/json";
-		}
-
-		// Merge body with endpoint defaults and resolve templates
-		let finalBody = body;
-		if (endpoint?.defaultBody && body) {
-			try {
-				const parsedBody = JSON.parse(body);
-				const merged = { ...endpoint.defaultBody, ...parsedBody };
-				// Resolve templates in the merged body
-				const resolved = resolveTemplatesInObject(merged);
-				finalBody = JSON.stringify(resolved);
-			} catch {
-				// Use as-is but still resolve templates
-				finalBody = resolveTemplates(body);
-			}
-		} else if (endpoint?.defaultBody && !body) {
-			const resolved = resolveTemplatesInObject(endpoint.defaultBody);
-			finalBody = JSON.stringify(resolved);
-		} else if (body) {
-			// Resolve templates in the body
-			try {
-				const parsed = JSON.parse(body);
-				const resolved = resolveTemplatesInObject(parsed);
-				finalBody = JSON.stringify(resolved);
-			} catch {
-				finalBody = resolveTemplates(body);
-			}
-		}
-
-		// Resolve templates in URL
-		url = resolveTemplates(url);
-
-		const effectiveMethod = endpoint?.method || method;
-
-		onUpdate?.({
-			content: [{ type: "text", text: `${effectiveMethod} ${url}...` }],
-		});
-
-		try {
-			const controller = new AbortController();
-			const timeoutId = setTimeout(() => controller.abort(), config.timeout || 30000);
-			signal?.addEventListener("abort", () => controller.abort());
-
-			const response = await fetch(url, {
-				method: effectiveMethod,
-				headers: finalHeaders,
-				body: finalBody,
-				signal: controller.signal,
-			});
-
-			clearTimeout(timeoutId);
-
-			const contentType = response.headers.get("content-type");
-			const duration = Date.now() - startTime;
-			const shouldStream = endpoint?.stream || contentType?.includes("text/event-stream");
-
-			let responseText = await response.text();
-			let sseResult: SSEParseResult | null = null;
-
-			// Parse SSE if streaming endpoint
-			if (shouldStream) {
-				sseResult = parseSSEResponse(responseText);
-			}
-
-			// Format JSON (for non-streaming responses)
-			if (!shouldStream && contentType?.includes("application/json")) {
-				try {
-					responseText = JSON.stringify(JSON.parse(responseText), null, 2);
-				} catch {
-					// Keep as-is
-				}
-			}
-
-			// Save if requested
-			let outputFile: string | undefined;
-			if (save) {
-				outputFile = saveOutput(cwd, responseText, contentType, url);
-			}
-
-			// Build result text
-			const statusEmoji = response.ok ? "✓" : "✗";
-			let resultText = `${statusEmoji} ${response.status} ${response.statusText} (${duration}ms)\n`;
-
-			// For streaming responses, show parsed summary
-			if (sseResult) {
-				if (sseResult.outputs.length > 0) {
-					resultText += `\n[OK] Generated ${sseResult.outputs.length} output(s):\n`;
-					for (const out of sseResult.outputs) {
-						const gcsUrl = `gs://${out.bucket_name}/${out.object_key}`;
-						resultText += `  • ${out.file_type} (${out.width}x${out.height})\n`;
-						resultText += `    ID: ${out.inference_request_id}\n`;
-						resultText += `    GCS: ${gcsUrl}\n`;
-					}
-				}
-
-				if (sseResult.responseText) {
-					resultText += `\n[>] Agent response:\n${sseResult.responseText}\n`;
-				}
-
-				if (sseResult.errors.length > 0) {
-					resultText += `\n[ERR] Errors:\n`;
-					for (const err of sseResult.errors) {
-						resultText += `  • ${err}\n`;
-					}
-				}
-
-				// Log generation to output directory
-				if (config.outputDir) {
-					try {
-						const bodyObj = finalBody ? JSON.parse(finalBody) : {};
-						const logPaths = logGeneration({
-							cwd,
-							prompt: bodyObj?.generation_params?.positive_prompt || "",
-							restructuredPrompt: sseResult.restructuredPrompt,
-							chatId: bodyObj?.chat_id,
-							generationMode: bodyObj?.generation_params?.generation_mode,
-							outputs: sseResult.outputs,
-							responseText: sseResult.responseText,
-							errors: sseResult.errors,
-							endpoint,
-						});
-						if (logPaths.length > 0) {
-							resultText += `\n[DIR] Logged to:\n`;
-							for (const p of logPaths) {
-								resultText += `  • ${p}\n`;
-							}
-						}
-					} catch {
-						// Ignore logging errors
-					}
-				}
-
-				// Add debug info if no outputs and endpoint has debug config
-				if (sseResult.outputs.length === 0 && endpoint?.debug) {
-					resultText += buildDebugInfo(cwd, endpoint, sseResult);
-				}
-			} else {
-				// Regular response - show truncated content
-				const maxLength = 10000;
-				let displayText = responseText;
-				let truncated = false;
-				if (responseText.length > maxLength) {
-					displayText = responseText.slice(0, maxLength);
-					truncated = true;
-				}
-
-				resultText += "\n" + displayText;
-				if (truncated) {
-					resultText += `\n\n[Truncated: ${responseText.length} bytes total]`;
-					if (outputFile) resultText += `\n[Full response: ${outputFile}]`;
-				} else if (outputFile) {
-					resultText += `\n\n[Saved: ${outputFile}]`;
-				}
-			}
-
-			// Add debug info on HTTP errors
-			if (!response.ok && endpoint?.debug) {
-				resultText += buildDebugInfo(cwd, endpoint, sseResult);
-			}
-
-			return {
-				content: [{ type: "text", text: resultText }],
-				details: {
-					status: response.status,
-					statusText: response.statusText,
-					duration,
-					contentType,
-					truncated: responseText.length > 10000,
-					outputFile,
-					outputs: sseResult?.outputs,
-					errors: sseResult?.errors,
-				},
-			};
-		} catch (error) {
-			const duration = Date.now() - startTime;
-			const message = error instanceof Error ? error.message : String(error);
-			return {
-				content: [{ type: "text", text: `Request failed: ${message}` }],
-				details: { error: message, duration },
-				isError: true,
-			};
-		}
-	}
-
-	// Register send_request tool
-	pi.registerTool({
-		name: "send_request",
-		label: "HTTP Request",
-		description: `Send an HTTP request. Supports GET, POST, PUT, PATCH, DELETE methods.
-Configuration loaded from .super-curl.json (project root or home directory).
-Features: automatic auth, named endpoints (@name), response saving.`,
-		parameters: Type.Object({
-			method: StringEnum(["GET", "POST", "PUT", "PATCH", "DELETE"] as const, {
-				description: "HTTP method",
-				default: "GET",
-			}),
-			url: Type.String({
-				description: "Full URL, path (uses baseUrl from config), or @endpoint name",
-			}),
-			headers: Type.Optional(Type.Record(Type.String(), Type.String(), {
-				description: "Additional headers",
-			})),
-			body: Type.Optional(Type.String({
-				description: "Request body (JSON string)",
-			})),
-			save: Type.Optional(Type.Boolean({
-				description: "Save response to output directory",
-				default: false,
-			})),
-		}),
-
-		async execute(_toolCallId, params, onUpdate, ctx, signal) {
-			return executeRequest({
-				method: params.method || "GET",
-				url: params.url,
-				body: params.body,
-				headers: params.headers || {},
-				save: params.save || false,
-				cwd: ctx.cwd,
-				onUpdate,
-				signal,
-			});
-		},
-
-		renderCall(args, theme) {
-			const method = args.method || "GET";
-			const url = args.url || "";
-			let text = theme.fg("toolTitle", theme.bold("send_request "));
-			text += theme.fg("accent", method);
-			text += " " + theme.fg("muted", url);
-			return new Text(text, 0, 0);
-		},
-
-		renderResult(result, { expanded }, theme) {
-			const details = result.details || {};
-
-			if (details.error) {
-				return new Text(theme.fg("error", `✗ ${result.content?.[0]?.text || "Failed"}`), 0, 0);
-			}
-
-			const statusColor = details.status < 300 ? "success" : details.status < 400 ? "warning" : "error";
-			let text = theme.fg(statusColor, `${details.status < 300 ? "✓" : "✗"} ${details.status}`);
-			text += theme.fg("muted", ` (${details.duration}ms)`);
-
-			if (details.outputFile) {
-				text += theme.fg("dim", ` → ${details.outputFile}`);
-			}
-
-			if (expanded) {
-				const content = result.content?.[0]?.text || "";
-				const lines = content.split("\n").slice(2, 20);
-				for (const line of lines) {
-					text += "\n" + theme.fg("dim", line.slice(0, 100));
-				}
-				if (content.split("\n").length > 20) {
-					text += "\n" + theme.fg("muted", "...");
-				}
-			}
-
-			return new Text(text, 0, 0);
-		},
-	});
-
-	// Quick /curl command
-	pi.registerCommand("curl", {
-		description: "Quick HTTP request: /curl [METHOD] URL [--body JSON]",
-		handler: async (args, ctx) => {
-			if (!args) {
-				ctx.ui.notify("Usage: /curl [METHOD] @endpoint [--body '{...}']", "info");
-				return;
-			}
-
-			// Parse args: [METHOD] URL [--body JSON]
-			const bodyMatch = args.match(/--body\s+['"]?(\{.*\})['"]?/);
-			const argsWithoutBody = args.replace(/--body\s+['"]?\{.*\}['"]?/, "").trim();
-			const parts = argsWithoutBody.split(/\s+/);
-			
-			let method: string | null = null;
-			let url = parts[0];
-
-			if (parts.length > 1 && ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(parts[0].toUpperCase())) {
-				method = parts[0].toUpperCase();
-				url = parts[1];
-			}
-
-			// If no method specified and it's a named endpoint, use endpoint's method
-			if (!method && url.startsWith("@")) {
-				config = loadConfig(ctx.cwd);
-				const endpointName = url.slice(1);
-				const endpoint = config.endpoints?.find((e) => e.name === endpointName);
-				if (endpoint?.method) {
-					method = endpoint.method;
-				}
-			}
-
-			// Default to GET if still no method
-			method = method || "GET";
-
-			let message = `Use send_request to ${method} ${url}`;
-			if (bodyMatch) {
-				message += ` with body ${bodyMatch[1]}`;
-			}
-
-			pi.sendUserMessage(message);
-		},
-	});
-
-	// /scurl-agent command - opens UI then delegates to api-tester subagent
-	pi.registerCommand("scurl-agent", {
-		description: "Open Super Curl UI, then delegate to api-tester subagent (Ctrl+T for templates)",
-		handler: async (_args, ctx) => {
-			config = loadConfig(ctx.cwd);
-
-			// Build template list (same as /scurl)
 			interface TemplateOption {
 				name: string;
 				label: string;
@@ -1844,6 +710,8 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 			const result = await ctx.ui.custom<RequestBuilderResult>((tui, theme, _kb, done) => {
 				let mode: "template" | "default" = "default";
 				let endpointIndex = 0;
+				let bodyScrollOffset = 0;
+				const bodyMaxVisible = 8;
 				let methodIndex = 0;
 				let fieldEditors: Map<string, Editor> = new Map();
 				let templateFieldIndex = 0;
@@ -1880,7 +748,7 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 					} else {
 						fields.push("prompt");
 					}
-					fields.push("body", "headers");
+					fields.push("body");
 					return fields;
 				}
 				
@@ -1925,6 +793,7 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 				function loadTemplate(idx: number) {
 					if (idx < 0 || idx >= templateOptions.length) return;
 					const opt = templateOptions[idx];
+					bodyScrollOffset = 0;
 					if (opt.endpoint) {
 						const methodIdx = METHODS.indexOf(opt.endpoint.method || "GET");
 						if (methodIdx >= 0) methodIndex = methodIdx;
@@ -2145,6 +1014,30 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 						}
 					}
 
+					// Handle body scrolling in template mode
+					if (mode === "template" && getCurrentTemplateField() === "body") {
+						const bodyLines = bodyEditor.getText().split("\n");
+						const maxScroll = Math.max(0, bodyLines.length - bodyMaxVisible);
+						if (matchesKey(data, Key.up)) {
+							bodyScrollOffset = Math.max(0, bodyScrollOffset - 1);
+							refresh();
+							return;
+						}
+						if (matchesKey(data, Key.down)) {
+							bodyScrollOffset = Math.min(maxScroll, bodyScrollOffset + 1);
+							refresh();
+							return;
+						}
+						bodyEditor.handleInput(data);
+						const newLines = bodyEditor.getText().split("\n");
+						const newMaxScroll = Math.max(0, newLines.length - bodyMaxVisible);
+						if (bodyScrollOffset > newMaxScroll) {
+							bodyScrollOffset = newMaxScroll;
+						}
+						refresh();
+						return;
+					}
+
 					// Forward to active editor
 					const editor = getActiveEditor();
 					if (editor) {
@@ -2161,13 +1054,14 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 					const innerWidth = boxWidth - 4;
 					const method = METHODS[methodIndex];
 
-					// Title
-					const title = mode === "template" 
-						? " 🚀 Super Curl → Subagent " 
-						: " 🚀 Super Curl (Custom) → Subagent ";
-					const modeHint = mode === "template" 
-						? theme.fg("dim", " Ctrl+T: custom mode") 
-						: theme.fg("dim", " Ctrl+T: template mode");
+					// Title with tabs
+					const templateTab = mode === "template" 
+						? theme.bg("selectedBg", theme.fg("text", " Template "))
+						: theme.fg("dim", " Template ");
+					const defaultTab = mode === "default"
+						? theme.bg("selectedBg", theme.fg("text", " Default "))
+						: theme.fg("dim", " Default ");
+					const title = " Super Curl ";
 					
 					function topBorder() {
 						const titleLen = title.replace(/[^\x20-\x7E]/g, " ").length;
@@ -2193,7 +1087,12 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 
 					lines.push("");
 					lines.push(topBorder());
-					lines.push(row(modeHint));
+					const tabsContent = defaultTab + "  " + templateTab;
+					const tabsHint = theme.fg("dim", "(Ctrl+T)");
+					const tabsLen = tabsContent.replace(/\x1b\[[0-9;]*m/g, "").length;
+					const hintLen = 8; // "(Ctrl+T)"
+					const tabsPadding = Math.max(1, innerWidth - tabsLen - hintLen);
+					lines.push(row(tabsContent + " ".repeat(tabsPadding) + tabsHint));
 					lines.push(divider());
 
 					if (mode === "template") {
@@ -2249,36 +1148,24 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 							lines.push(divider());
 						}
 
-						// Body field
+						// Body field (optional, scrollable)
 						const bodyActive = currentField === "body";
-						const bodyText = bodyEditor.getText().trim();
-						lines.push(row(fieldLabel("Body:", bodyActive, "JSON - auto-merged")));
+						const bodyText = bodyEditor.getText();
 						if (bodyActive) {
 							const bodyLines = bodyEditor.render(innerWidth - 2);
-							for (const line of bodyLines.slice(0, 8)) {
-								lines.push(row("  " + line));
-							}
-							if (bodyLines.length > 8) {
-								lines.push(row(theme.fg("dim", `    ... ${bodyLines.length - 8} more lines`)));
-							}
-						} else {
-							const preview = bodyText ? bodyText.replace(/\s+/g, " ").slice(0, innerWidth - 8) : "(empty)";
-							lines.push(row(theme.fg("dim", "  " + preview)));
-						}
-						lines.push(divider());
-
-						// Headers field
-						const headersActive = currentField === "headers";
-						const headersText = headersEditor.getText().trim();
-						lines.push(row(fieldLabel("Headers:", headersActive, "optional")));
-						if (headersActive) {
-							const headerLines = headersEditor.render(innerWidth - 2);
-							for (const line of headerLines) {
+							const totalLines = bodyLines.length;
+							const scrollable = totalLines > bodyMaxVisible;
+							const scrollHint = scrollable 
+								? ` ↑↓ scroll ${bodyScrollOffset + 1}-${Math.min(bodyScrollOffset + bodyMaxVisible, totalLines)}/${totalLines}`
+								: "";
+							lines.push(row(fieldLabel("Body:", true, "optional, JSON") + theme.fg("dim", scrollHint)));
+							const visibleLines = bodyLines.slice(bodyScrollOffset, bodyScrollOffset + bodyMaxVisible);
+							for (const line of visibleLines) {
 								lines.push(row("  " + line));
 							}
 						} else {
-							const preview = headersText ? headersText.split("\n")[0] : "(none)";
-							lines.push(row(theme.fg("dim", "  " + preview)));
+							const bodyHint = bodyText.trim() ? theme.fg("dim", " (has content)") : "";
+							lines.push(row(theme.fg("muted", "  Body") + theme.fg("dim", " optional") + bodyHint));
 						}
 
 					} else {
@@ -2294,7 +1181,7 @@ Features: automatic auth, named endpoints (@name), response saving.`,
 								return theme.fg("dim", ` ${m} `);
 							}
 						}).join(" ");
-						lines.push(row(fieldLabel("Method:", methodActive) + "  " + methodButtons));
+						lines.push(row(fieldLabel("Method:", methodActive) + "  " + methodButtons + (methodActive ? theme.fg("dim", "  ←→ change") : "")));
 						lines.push(divider());
 
 						const urlActive = customField === "url";
