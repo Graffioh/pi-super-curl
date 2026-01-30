@@ -1080,7 +1080,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 						return theme.fg("accent", "│ ") + content + " ".repeat(padding) + theme.fg("accent", " │");
 					}
 					function fieldLabel(label: string, active: boolean, hint?: string) {
-						const labelText = active ? theme.fg("accent", theme.bold(label)) : theme.fg("muted", label);
+						const labelText = active ? theme.fg("warning", theme.bold(label)) : theme.fg("muted", label);
 						if (hint) return labelText + " " + theme.fg("dim", `(${hint})`);
 						return labelText;
 					}
@@ -1109,7 +1109,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 							const isSelected = i === endpointIndex;
 							const prefix = isSelected ? (endpointActive ? "▸ " : "› ") : "  ";
 							const text = isSelected && endpointActive
-								? theme.fg("accent", prefix + opt.label)
+								? theme.fg("warning", prefix + opt.label)
 								: isSelected
 								? theme.fg("text", prefix + opt.label)
 								: theme.fg("dim", prefix + opt.label);
@@ -1142,9 +1142,9 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 							// Only show "more" if there's actual text content that's truncated
 							if (textLineCount > maxLines) {
 								lines.push(row(theme.fg("dim", `    ... ${textLineCount - maxLines} more`)));
-								// Add bottom border when content is truncated
-								lines.push(row("  " + theme.fg("accent", "─".repeat(innerWidth - 4))));
 							}
+							// Add bottom border for the input field
+							lines.push(row("  " + theme.fg("dim", "─".repeat(innerWidth - 4))));
 							lines.push(divider());
 						}
 
