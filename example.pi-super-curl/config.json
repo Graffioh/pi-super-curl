@@ -1,9 +1,17 @@
 {
   "baseUrl": "https://httpbin.org",
   "timeout": 30000,
-  "outputDir": "~/Desktop/api-responses",
+  "envFile": ".env",
   "headers": {
     "User-Agent": "super-curl/1.0"
+  },
+  "customLogging": {
+    "enabled": true,
+    "outputDir": "~/Desktop/api-responses",
+    "logs": {
+      "backend": "/tmp/generation-output.txt"
+    },
+    "postScript": "process-output.js"
   },
   "endpoints": [
     {
@@ -20,39 +28,39 @@
       }
     },
     {
-      "name": "status",
-      "url": "/status/200",
+      "name": "headers",
+      "url": "/headers",
       "method": "GET"
     }
   ],
   "templates": [
     {
       "name": "quick-post",
-      "description": "Quick POST with timestamp",
+      "description": "Quick POST with dynamic values",
       "endpoint": "post",
       "body": {
         "timestamp": "{{timestamp}}",
-        "request_id": "{{uuid}}"
+        "request_id": "{{uuid}}",
+        "date": "{{date}}"
       }
     },
     {
-      "name": "json-post",
-      "description": "POST with JSON content type",
+      "name": "custom-post",
+      "description": "POST with custom message",
       "endpoint": "post",
+      "fields": [
+        {
+          "name": "message",
+          "label": "Message",
+          "path": "data.message"
+        }
+      ],
       "body": {
         "data": {
-          "message": "Hello from super-curl",
+          "message": "",
           "created_at": "{{date}}"
         }
-      },
-      "headers": {
-        "Accept": "application/json"
       }
-    },
-    {
-      "name": "check-headers",
-      "description": "Inspect request headers",
-      "endpoint": "headers"
     }
   ]
 }

@@ -7,15 +7,17 @@
  * - Automatic authentication (Bearer tokens, API keys, JWT generation)
  * - Response saving to configurable directory
  * - Template variables ({{uuid}}, {{uuidv7}}, {{env.VAR}}, {{timestamp}})
+ * - Request history with replay support
+ * - cURL import (Ctrl+U in request builder)
+ * - Custom logging with optional post-processing script
  *
  * Usage:
  *   pi -e ~/Desktop/super-curl
  *
  * Commands:
- *   /request - Open Postman-like request builder UI
- *   /curl [METHOD] URL - Quick request (direct)
- *   /curl-agent [METHOD] URL - Quick request via api-tester subagent
- *   /endpoints - List configured endpoints
+ *   /scurl - Open Postman-like request builder UI (Ctrl+U to import cURL)
+ *   /scurl-history - Browse and replay past requests
+ *   /scurl-log - Capture logs after request (uses customLogging config)
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -106,15 +108,23 @@ interface SSEParseResult {
 	restructuredPrompt?: string;
 }
 
+// Custom logging configuration for project-specific generation output
+interface CustomLoggingConfig {
+	enabled: boolean;
+	outputDir: string; // e.g., "~/Desktop/morphic-generations"
+	logs?: Record<string, string>; // Map of log name to path, e.g., { "backend": "/tmp/output.txt", "workflow": "apps/logs/dev.log" }
+	postScript?: string; // Optional path to custom post-processing script (receives output dir as argument)
+}
+
 interface SuperCurlConfig {
 	baseUrl?: string;
 	auth?: AuthConfig;
 	headers?: Record<string, string>;
-	outputDir?: string;
 	endpoints?: EndpointConfig[];
 	templates?: TemplateConfig[]; // Pre-configured request templates
 	timeout?: number;
 	envFile?: string; // Path to .env file (relative to project or absolute)
+	customLogging?: CustomLoggingConfig; // Optional project-specific generation logging
 }
 
 // Loaded environment variables from envFile
@@ -130,23 +140,41 @@ interface RequestBuilderResult {
 	endpoint?: string; // Selected endpoint name
 }
 
+// History entry for storing past requests
+interface HistoryEntry {
+	id: string;
+	timestamp: number;
+	method: string;
+	url: string;
+	body?: string;
+	headers?: Record<string, string>;
+	endpoint?: string;
+	template?: string;
+}
+
 const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+const HISTORY_PATH = path.join(os.homedir(), ".super-curl-history.json");
+const MAX_HISTORY = 50;
 
 export default function superCurlExtension(pi: ExtensionAPI) {
 	let config: SuperCurlConfig = {};
+	let configDir: string = ""; // Directory where config was loaded from
 
 	// Load configuration
 	function loadConfig(cwd: string): SuperCurlConfig {
+		// Config location: .pi-super-curl/config.json
+		// Search order: project directory, then home directory
 		const configPaths = [
-			path.join(cwd, ".super-curl.json"),
-			path.join(os.homedir(), ".super-curl.json"),
+			{ path: path.join(cwd, ".pi-super-curl", "config.json"), dir: path.join(cwd, ".pi-super-curl") },
+			{ path: path.join(os.homedir(), ".pi-super-curl", "config.json"), dir: path.join(os.homedir(), ".pi-super-curl") },
 		];
 
-		for (const configPath of configPaths) {
+		for (const { path: configPath, dir } of configPaths) {
 			if (fs.existsSync(configPath)) {
 				try {
 					const content = fs.readFileSync(configPath, "utf-8");
 					const cfg = JSON.parse(content) as SuperCurlConfig;
+					configDir = dir;
 					
 					// Load env file if specified
 					if (cfg.envFile) {
@@ -159,6 +187,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				}
 			}
 		}
+		configDir = cwd;
 		return {};
 	}
 
@@ -181,6 +210,257 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				loadedEnv = { ...loadedEnv, ...result.parsed };
 			}
 		}
+	}
+
+	// ===== History Management =====
+	
+	function loadHistory(): HistoryEntry[] {
+		try {
+			if (fs.existsSync(HISTORY_PATH)) {
+				const content = fs.readFileSync(HISTORY_PATH, "utf-8");
+				return JSON.parse(content) as HistoryEntry[];
+			}
+		} catch {
+			// Ignore errors, return empty
+		}
+		return [];
+	}
+
+	function saveHistory(history: HistoryEntry[]): void {
+		try {
+			fs.writeFileSync(HISTORY_PATH, JSON.stringify(history, null, 2));
+		} catch {
+			// Ignore write errors
+		}
+	}
+
+	function addToHistory(entry: Omit<HistoryEntry, "id" | "timestamp">): void {
+		const history = loadHistory();
+		const newEntry: HistoryEntry = {
+			...entry,
+			id: uuidv4(),
+			timestamp: Date.now(),
+		};
+		history.unshift(newEntry);
+		saveHistory(history.slice(0, MAX_HISTORY));
+	}
+
+	function deleteFromHistory(id: string): void {
+		const history = loadHistory();
+		const filtered = history.filter(h => h.id !== id);
+		saveHistory(filtered);
+	}
+
+	function clearHistory(): void {
+		saveHistory([]);
+	}
+
+	function formatHistoryEntry(entry: HistoryEntry): string {
+		const date = new Date(entry.timestamp);
+		const timeStr = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+		const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+		const url = entry.endpoint ? `@${entry.endpoint}` : entry.url;
+		const truncatedUrl = url.length > 40 ? url.slice(0, 37) + "..." : url;
+		return `${entry.method.padEnd(6)} ${truncatedUrl.padEnd(42)} ${dateStr} ${timeStr}`;
+	}
+
+	// ===== cURL Parser =====
+
+	interface ParsedCurl {
+		method: string;
+		url: string;
+		headers: Record<string, string>;
+		body?: string;
+		error?: string;
+	}
+
+	function parseCurl(curlCommand: string): ParsedCurl {
+		const result: ParsedCurl = {
+			method: "GET",
+			url: "",
+			headers: {},
+		};
+
+		// Normalize: remove line continuations and extra whitespace
+		let cmd = curlCommand
+			.replace(/\\\s*\n/g, " ")  // Remove line continuations
+			.replace(/\s+/g, " ")       // Normalize whitespace
+			.trim();
+
+		// Remove 'curl' prefix if present
+		if (cmd.toLowerCase().startsWith("curl ")) {
+			cmd = cmd.slice(5).trim();
+		}
+
+		// Tokenize respecting quotes
+		const tokens: string[] = [];
+		let current = "";
+		let inQuote: string | null = null;
+		let escape = false;
+
+		for (let i = 0; i < cmd.length; i++) {
+			const char = cmd[i];
+
+			if (escape) {
+				current += char;
+				escape = false;
+				continue;
+			}
+
+			if (char === "\\") {
+				escape = true;
+				continue;
+			}
+
+			if (inQuote) {
+				if (char === inQuote) {
+					inQuote = null;
+				} else {
+					current += char;
+				}
+			} else {
+				if (char === '"' || char === "'") {
+					inQuote = char;
+				} else if (char === " ") {
+					if (current) {
+						tokens.push(current);
+						current = "";
+					}
+				} else {
+					current += char;
+				}
+			}
+		}
+		if (current) tokens.push(current);
+
+		// Parse tokens
+		let i = 0;
+		while (i < tokens.length) {
+			const token = tokens[i];
+
+			// Method
+			if (token === "-X" || token === "--request") {
+				i++;
+				if (i < tokens.length) {
+					result.method = tokens[i].toUpperCase();
+				}
+				i++;
+				continue;
+			}
+
+			// Headers
+			if (token === "-H" || token === "--header") {
+				i++;
+				if (i < tokens.length) {
+					const header = tokens[i];
+					const colonIdx = header.indexOf(":");
+					if (colonIdx > 0) {
+						const key = header.slice(0, colonIdx).trim();
+						const value = header.slice(colonIdx + 1).trim();
+						result.headers[key] = value;
+					}
+				}
+				i++;
+				continue;
+			}
+
+			// Data/Body
+			if (token === "-d" || token === "--data" || token === "--data-raw" || token === "--data-binary") {
+				i++;
+				if (i < tokens.length) {
+					result.body = tokens[i];
+					// If we have a body and method is still GET, assume POST
+					if (result.method === "GET") {
+						result.method = "POST";
+					}
+				}
+				i++;
+				continue;
+			}
+
+			// JSON shorthand (some curl versions)
+			if (token === "--json") {
+				i++;
+				if (i < tokens.length) {
+					result.body = tokens[i];
+					result.headers["Content-Type"] = "application/json";
+					if (result.method === "GET") {
+						result.method = "POST";
+					}
+				}
+				i++;
+				continue;
+			}
+
+			// Skip common flags we don't need
+			if (token === "-i" || token === "--include" ||
+				token === "-s" || token === "--silent" ||
+				token === "-S" || token === "--show-error" ||
+				token === "-v" || token === "--verbose" ||
+				token === "-k" || token === "--insecure" ||
+				token === "-L" || token === "--location" ||
+				token === "-f" || token === "--fail" ||
+				token === "-o" || token === "--output" ||
+				token === "-O" || token === "--remote-name" ||
+				token === "-w" || token === "--write-out" ||
+				token === "-A" || token === "--user-agent" ||
+				token === "-e" || token === "--referer" ||
+				token === "-b" || token === "--cookie" ||
+				token === "-c" || token === "--cookie-jar" ||
+				token === "--compressed" ||
+				token === "--http1.1" || token === "--http2") {
+				// Some of these take an argument
+				if (token === "-o" || token === "--output" ||
+					token === "-w" || token === "--write-out" ||
+					token === "-A" || token === "--user-agent" ||
+					token === "-e" || token === "--referer" ||
+					token === "-b" || token === "--cookie" ||
+					token === "-c" || token === "--cookie-jar") {
+					i++; // Skip the argument too
+				}
+				i++;
+				continue;
+			}
+
+			// Timeout
+			if (token === "--connect-timeout" || token === "-m" || token === "--max-time") {
+				i += 2; // Skip flag and value
+				continue;
+			}
+
+			// URL (anything that looks like a URL or doesn't start with -)
+			if (!token.startsWith("-") && !result.url) {
+				result.url = token;
+			}
+
+			i++;
+		}
+
+		if (!result.url) {
+			result.error = "No URL found in cURL command";
+		}
+
+		return result;
+	}
+
+	function formatCurlExport(method: string, url: string, headers: Record<string, string>, body?: string): string {
+		let curl = `curl -X ${method}`;
+		
+		for (const [key, value] of Object.entries(headers)) {
+			// Escape single quotes in header values
+			const escapedValue = value.replace(/'/g, "'\\''");
+			curl += ` \\\n  -H '${key}: ${escapedValue}'`;
+		}
+		
+		if (body) {
+			// Escape single quotes in body
+			const escapedBody = body.replace(/'/g, "'\\''");
+			curl += ` \\\n  -d '${escapedBody}'`;
+		}
+		
+		curl += ` \\\n  '${url}'`;
+		
+		return curl;
 	}
 
 	// Resolve env var values (from $VAR syntax)
@@ -478,45 +758,6 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 		return headers;
 	}
 
-	// Get output directory
-	function getOutputDir(cwd: string): string {
-		if (config.outputDir) {
-			const dir = config.outputDir.startsWith("~")
-				? path.join(os.homedir(), config.outputDir.slice(1))
-				: path.resolve(cwd, config.outputDir);
-			if (!fs.existsSync(dir)) {
-				fs.mkdirSync(dir, { recursive: true });
-			}
-			return dir;
-		}
-		return path.join(os.homedir(), "Desktop", "api-responses");
-	}
-
-	// Save response to file
-	function saveOutput(cwd: string, response: string, contentType: string | null, url: string): string {
-		const outputDir = getOutputDir(cwd);
-		if (!fs.existsSync(outputDir)) {
-			fs.mkdirSync(outputDir, { recursive: true });
-		}
-
-		const timestamp = Date.now();
-		let urlPath = "";
-		try {
-			urlPath = new URL(url).pathname.replace(/\//g, "_").slice(0, 50);
-		} catch {
-			urlPath = "_response";
-		}
-
-		let extension = "txt";
-		if (contentType?.includes("application/json")) extension = "json";
-		else if (contentType?.includes("text/html")) extension = "html";
-
-		const filename = `response_${timestamp}${urlPath}.${extension}`;
-		const filepath = path.join(outputDir, filename);
-		fs.writeFileSync(filepath, response);
-		return filepath;
-	}
-
 	// Log generation outputs to directory (like send-message skill)
 	interface GenerationLogParams {
 		cwd: string;
@@ -527,13 +768,17 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 		outputs: SSEOutput[];
 		responseText?: string;
 		errors: string[];
-		endpoint?: EndpointConfig;
 	}
 
 	function logGeneration(params: GenerationLogParams): string[] {
-		const outputDir = config.outputDir 
-			? path.resolve(params.cwd, config.outputDir.replace(/^~/, os.homedir()))
-			: null;
+		// Use customLogging.outputDir if enabled, otherwise skip
+		if (!config.customLogging?.enabled || !config.customLogging?.outputDir) {
+			return [];
+		}
+		
+		const outputDir = config.customLogging.outputDir.startsWith("~")
+			? path.join(os.homedir(), config.customLogging.outputDir.slice(1))
+			: path.resolve(params.cwd, config.customLogging.outputDir);
 		
 		if (!outputDir) return [];
 
@@ -581,7 +826,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 			loggedPaths.push(errorDir);
 
 			// Copy logs
-			copyDebugLogs(params.cwd, errorDir, params.endpoint);
+			copyCustomLogs(params.cwd, errorDir);
 			return loggedPaths;
 		}
 
@@ -634,7 +879,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 
 			// Copy logs for first output only
 			if (output === params.outputs[0]) {
-				copyDebugLogs(params.cwd, outDir, params.endpoint);
+				copyCustomLogs(params.cwd, outDir);
 			}
 
 			loggedPaths.push(outDir);
@@ -643,24 +888,24 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 		return loggedPaths;
 	}
 
-	function copyDebugLogs(cwd: string, destDir: string, endpoint?: EndpointConfig): void {
-		if (!endpoint?.debug) return;
+	// Copy log files defined in customLogging.logs config
+	function copyCustomLogs(cwd: string, destDir: string): void {
+		const logs = config.customLogging?.logs;
+		if (!logs) return;
 
-		// Copy workflow logs
-		if (endpoint.debug.workflowLogs) {
-			const src = path.resolve(cwd, endpoint.debug.workflowLogs);
+		for (const [name, logPath] of Object.entries(logs)) {
+			// Resolve path (absolute or relative to cwd)
+			const src = path.isAbsolute(logPath) 
+				? logPath 
+				: path.resolve(cwd, logPath);
+			
 			if (fs.existsSync(src)) {
-				const dest = path.join(destDir, "workflow-logs.txt");
-				fs.copyFileSync(src, dest);
-			}
-		}
-
-		// Copy backend logs
-		if (endpoint.debug.backendLogs) {
-			const src = path.resolve(cwd, endpoint.debug.backendLogs);
-			if (fs.existsSync(src)) {
-				const dest = path.join(destDir, "backend-logs.txt");
-				fs.copyFileSync(src, dest);
+				const dest = path.join(destDir, `${name}-logs.txt`);
+				try {
+					fs.copyFileSync(src, dest);
+				} catch {
+					// Ignore copy errors
+				}
 			}
 		}
 	}
@@ -718,6 +963,10 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				type CustomField = "method" | "url" | "body" | "headers";
 				let customField: CustomField = "method";
 				let cachedLines: string[] | undefined;
+				
+				// cURL import popup state
+				let showCurlImport = false;
+				let curlImportError: string | null = null;
 
 				const editorTheme: EditorTheme = {
 					borderColor: (s) => theme.fg("accent", s),
@@ -733,6 +982,42 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				const urlEditor = new Editor(tui, editorTheme);
 				const bodyEditor = new Editor(tui, editorTheme);
 				const headersEditor = new Editor(tui, editorTheme);
+				const curlEditor = new Editor(tui, editorTheme);
+
+				// Apply parsed cURL to form fields
+				function applyCurl(parsed: ParsedCurl): void {
+					// Set method
+					const methodIdx = METHODS.indexOf(parsed.method as typeof METHODS[number]);
+					if (methodIdx >= 0) {
+						methodIndex = methodIdx;
+					}
+					
+					// Set URL
+					urlEditor.setText(parsed.url);
+					
+					// Set headers
+					const headerLines = Object.entries(parsed.headers)
+						.map(([k, v]) => `${k}: ${v}`)
+						.join("\n");
+					headersEditor.setText(headerLines);
+					
+					// Set body
+					if (parsed.body) {
+						// Try to pretty-print JSON
+						try {
+							const jsonBody = JSON.parse(parsed.body);
+							bodyEditor.setText(JSON.stringify(jsonBody, null, 2));
+						} catch {
+							bodyEditor.setText(parsed.body);
+						}
+					} else {
+						bodyEditor.setText("");
+					}
+					
+					// Switch to default mode to show the imported request
+					mode = "default";
+					customField = "url";
+				}
 
 				const defaultPromptField: TemplateFieldConfig = {
 					name: "prompt",
@@ -926,8 +1211,59 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				}
 
 				function handleInput(data: string) {
+					// Handle cURL import popup
+					if (showCurlImport) {
+						if (matchesKey(data, Key.escape)) {
+							showCurlImport = false;
+							curlImportError = null;
+							curlEditor.setText("");
+							refresh();
+							return;
+						}
+
+						if (matchesKey(data, Key.ctrl("enter")) || matchesKey(data, Key.ctrl("j"))) {
+							const curlText = curlEditor.getText().trim();
+							if (!curlText) {
+								curlImportError = "Please paste a cURL command";
+								refresh();
+								return;
+							}
+
+							const parsed = parseCurl(curlText);
+							if (parsed.error) {
+								curlImportError = parsed.error;
+								refresh();
+								return;
+							}
+
+							// Apply parsed cURL to form
+							applyCurl(parsed);
+							showCurlImport = false;
+							curlImportError = null;
+							curlEditor.setText("");
+							refresh();
+							return;
+						}
+
+						// Forward to cURL editor
+						curlEditor.handleInput(data);
+						curlImportError = null; // Clear error on typing
+						refresh();
+						return;
+					}
+
 					if (matchesKey(data, Key.escape)) {
 						done({ method: METHODS[methodIndex], url: "", body: "", headers: "", cancelled: true });
+						return;
+					}
+
+					// Open cURL import popup (Ctrl+U for "import URL")
+					// Note: Can't use Ctrl+I because it's the same as Tab in terminals
+					if (matchesKey(data, Key.ctrl("u"))) {
+						showCurlImport = true;
+						curlImportError = null;
+						curlEditor.setText("");
+						refresh();
 						return;
 					}
 
@@ -1054,6 +1390,63 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					const innerWidth = boxWidth - 4;
 					const method = METHODS[methodIndex];
 
+					// Helper functions for box drawing
+					function makeTopBorder(title: string) {
+						const titleLen = title.replace(/[^\x20-\x7E]/g, " ").length;
+						const remaining = boxWidth - 2 - titleLen;
+						return theme.fg("accent", "╭") + theme.fg("accent", theme.bold(title)) + theme.fg("accent", "─".repeat(remaining) + "╮");
+					}
+					function makeBottomBorder() {
+						return theme.fg("accent", "╰" + "─".repeat(boxWidth - 2) + "╯");
+					}
+					function makeDivider() {
+						return theme.fg("accent", "├" + "─".repeat(boxWidth - 2) + "┤");
+					}
+					function makeRow(content: string) {
+						const contentLen = content.replace(/\x1b\[[0-9;]*m/g, "").length;
+						const padding = Math.max(0, innerWidth - contentLen);
+						return theme.fg("accent", "│ ") + content + " ".repeat(padding) + theme.fg("accent", " │");
+					}
+
+					// cURL Import Popup
+					if (showCurlImport) {
+						lines.push("");
+						lines.push(makeTopBorder(" Import cURL "));
+						lines.push(makeRow(""));
+						lines.push(makeRow(theme.fg("muted", "Paste your cURL command below:")));
+						lines.push(makeRow(""));
+						
+						// Render cURL editor (multi-line)
+						const curlLines = curlEditor.render(innerWidth - 2);
+						const maxCurlLines = 10;
+						for (let i = 0; i < Math.min(curlLines.length, maxCurlLines); i++) {
+							lines.push(makeRow("  " + curlLines[i]));
+						}
+						if (curlLines.length > maxCurlLines) {
+							lines.push(makeRow(theme.fg("dim", `  ... ${curlLines.length - maxCurlLines} more lines`)));
+						}
+						
+						// Show error if any
+						if (curlImportError) {
+							lines.push(makeRow(""));
+							lines.push(makeRow(theme.fg("error", "  ✗ " + curlImportError)));
+						}
+						
+						lines.push(makeDivider());
+						const importShortcuts = [
+							theme.fg("muted", "Ctrl+Enter") + theme.fg("dim", " import"),
+							theme.fg("muted", "Esc") + theme.fg("dim", " cancel"),
+						];
+						lines.push(makeRow(importShortcuts.join("  ")));
+						lines.push(makeBottomBorder());
+						lines.push("");
+						lines.push(theme.fg("dim", "  Supports: curl -X METHOD -H 'Header: value' -d 'body' URL"));
+						lines.push("");
+						
+						cachedLines = lines;
+						return lines;
+					}
+
 					// Title with tabs
 					const templateTab = mode === "template" 
 						? theme.bg("selectedBg", theme.fg("text", " Template "))
@@ -1063,22 +1456,12 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 						: theme.fg("dim", " Default ");
 					const title = " Super Curl ";
 					
-					function topBorder() {
-						const titleLen = title.replace(/[^\x20-\x7E]/g, " ").length;
-						const remaining = boxWidth - 2 - titleLen;
-						return theme.fg("accent", "╭") + theme.fg("accent", theme.bold(title)) + theme.fg("accent", "─".repeat(remaining) + "╮");
-					}
-					function bottomBorder() {
-						return theme.fg("accent", "╰" + "─".repeat(boxWidth - 2) + "╯");
-					}
-					function divider() {
-						return theme.fg("accent", "├" + "─".repeat(boxWidth - 2) + "┤");
-					}
-					function row(content: string) {
-						const contentLen = content.replace(/\x1b\[[0-9;]*m/g, "").length;
-						const padding = Math.max(0, innerWidth - contentLen);
-						return theme.fg("accent", "│ ") + content + " ".repeat(padding) + theme.fg("accent", " │");
-					}
+					// Alias the helper functions for cleaner code below
+					const topBorder = () => makeTopBorder(title);
+					const bottomBorder = makeBottomBorder;
+					const divider = makeDivider;
+					const row = makeRow;
+					
 					function fieldLabel(label: string, active: boolean, hint?: string) {
 						const labelText = active ? theme.fg("warning", theme.bold(label)) : theme.fg("muted", label);
 						if (hint) return labelText + " " + theme.fg("dim", `(${hint})`);
@@ -1220,6 +1603,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					const shortcuts = [
 						theme.fg("muted", "Tab") + theme.fg("dim", " next"),
 						theme.fg("muted", "Enter") + theme.fg("dim", " send"),
+						theme.fg("muted", "Ctrl+U") + theme.fg("dim", " import cURL"),
 						theme.fg("muted", "Esc") + theme.fg("dim", " cancel"),
 					];
 					lines.push("  " + shortcuts.join(theme.fg("dim", "  •  ")));
@@ -1273,24 +1657,476 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				task += ` with headers: ${headerEntries.map(([k, v]) => `${k}: ${v}`).join(", ")}`;
 			}
 
+			// Save to history
+			addToHistory({
+				method: method,
+				url: result.url,
+				body: result.body || undefined,
+				headers: Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+				endpoint: result.endpoint,
+			});
+
 			// Delegate to api-tester subagent
 			pi.sendUserMessage(`Use subagent api-tester to test: ${task}`);
 		},
 	});
 
-	// List endpoints command
-	pi.registerCommand("endpoints", {
-		description: "List configured endpoints",
+	// Log command - captures logs after subagent request completes
+	pi.registerCommand("scurl-log", {
+		description: "Capture logs from last request (uses customLogging config)",
 		handler: async (_args, ctx) => {
 			config = loadConfig(ctx.cwd);
 
-			if (!config.endpoints || config.endpoints.length === 0) {
-				ctx.ui.notify("No endpoints configured. Add them to .super-curl.json", "info");
+			// Check if customLogging is configured
+			if (!config.customLogging?.enabled) {
+				ctx.ui.notify("customLogging not enabled in .pi-super-curl/config.json", "error");
 				return;
 			}
 
-			const lines = config.endpoints.map((e) => `@${e.name}: ${e.method || "GET"} ${e.url}`);
-			ctx.ui.notify(`Endpoints:\n${lines.join("\n")}`, "info");
+			if (!config.customLogging.outputDir) {
+				ctx.ui.notify("customLogging.outputDir not configured", "error");
+				return;
+			}
+
+			if (!config.customLogging.logs || Object.keys(config.customLogging.logs).length === 0) {
+				ctx.ui.notify("customLogging.logs not configured", "error");
+				return;
+			}
+
+			// Resolve output directory
+			const baseOutputDir = config.customLogging.outputDir.startsWith("~")
+				? path.join(os.homedir(), config.customLogging.outputDir.slice(1))
+				: path.resolve(ctx.cwd, config.customLogging.outputDir);
+
+			// Create timestamp-based directory
+			const timestamp = Date.now();
+			const outputDir = path.join(baseOutputDir, String(timestamp));
+
+			// Ensure directories exist
+			if (!fs.existsSync(outputDir)) {
+				fs.mkdirSync(outputDir, { recursive: true });
+			}
+
+			// Copy all configured log files
+			const copiedLogs: string[] = [];
+			const missingLogs: string[] = [];
+
+			for (const [name, logPath] of Object.entries(config.customLogging.logs)) {
+				// Resolve path (absolute or relative to cwd)
+				const src = path.isAbsolute(logPath)
+					? logPath
+					: path.resolve(ctx.cwd, logPath);
+
+				const destFilename = `${name}.txt`;
+				const dest = path.join(outputDir, destFilename);
+
+				if (fs.existsSync(src)) {
+					try {
+						fs.copyFileSync(src, dest);
+						copiedLogs.push(destFilename);
+					} catch (err) {
+						missingLogs.push(`${name} (copy failed)`);
+					}
+				} else {
+					missingLogs.push(`${name} (not found)`);
+				}
+			}
+
+			// Run post-processing script if configured
+			// Scripts are resolved relative to configDir (.pi-super-curl/ directory)
+			let postScriptResult = "";
+			if (config.customLogging.postScript) {
+				const scriptPath = path.isAbsolute(config.customLogging.postScript)
+					? config.customLogging.postScript
+					: path.resolve(configDir, config.customLogging.postScript);
+
+				if (fs.existsSync(scriptPath)) {
+					try {
+						const { execSync } = require("child_process");
+						// Pass output directory as argument, run from cwd
+						execSync(`"${scriptPath}" "${outputDir}"`, {
+							cwd: ctx.cwd,
+							stdio: "pipe",
+							timeout: 60000, // 1 minute timeout
+						});
+						postScriptResult = "\n  Post-script: ✓ executed";
+					} catch (err) {
+						postScriptResult = `\n  Post-script: ✗ ${err instanceof Error ? err.message : "failed"}`;
+					}
+				} else {
+					postScriptResult = `\n  Post-script: ✗ not found at ${scriptPath}`;
+				}
+			}
+
+			// Show result
+			if (copiedLogs.length > 0) {
+				ctx.ui.notify(
+					`✓ Logs saved to ${outputDir}\n` +
+					`  Files: ${copiedLogs.join(", ")}` +
+					(missingLogs.length > 0 ? `\n  Missing: ${missingLogs.join(", ")}` : "") +
+					postScriptResult,
+					"success"
+				);
+			} else {
+				ctx.ui.notify(
+					`✗ No logs found\n` +
+					`  Missing: ${missingLogs.join(", ")}`,
+					"error"
+				);
+			}
+		},
+	});
+
+	// History browser result
+	interface HistoryBrowserResult {
+		action: "replay" | "delete" | "clear" | "cancel";
+		entry?: HistoryEntry;
+	}
+
+	// History browser command
+	pi.registerCommand("scurl-history", {
+		description: "Browse and replay request history",
+		handler: async (_args, ctx) => {
+			const history = loadHistory();
+
+			if (history.length === 0) {
+				ctx.ui.notify("No request history yet. Use /scurl to make requests.", "info");
+				return;
+			}
+
+			const result = await ctx.ui.custom<HistoryBrowserResult>((tui, theme, _kb, done) => {
+				let selectedIndex = 0;
+				let scrollOffset = 0;
+				const maxVisible = 12;
+				let showDetails = false;
+				let confirmClear = false;
+				let cachedLines: string[] | undefined;
+
+				function refresh() {
+					cachedLines = undefined;
+					tui.requestRender();
+				}
+
+				function handleInput(data: string) {
+					// Cancel confirmation mode
+					if (confirmClear) {
+						if (data.toLowerCase() === "y") {
+							clearHistory();
+							done({ action: "clear" });
+							return;
+						}
+						confirmClear = false;
+						refresh();
+						return;
+					}
+
+					if (matchesKey(data, Key.escape)) {
+						if (showDetails) {
+							showDetails = false;
+							refresh();
+							return;
+						}
+						done({ action: "cancel" });
+						return;
+					}
+
+					if (matchesKey(data, Key.enter)) {
+						const entry = history[selectedIndex];
+						if (entry) {
+							done({ action: "replay", entry });
+						}
+						return;
+					}
+
+					// Toggle details view
+					if (data === "d" || data === "D") {
+						showDetails = !showDetails;
+						refresh();
+						return;
+					}
+
+					// Delete entry
+					if (data === "x" || data === "X" || matchesKey(data, Key.delete) || matchesKey(data, Key.backspace)) {
+						const entry = history[selectedIndex];
+						if (entry) {
+							deleteFromHistory(entry.id);
+							history.splice(selectedIndex, 1);
+							if (selectedIndex >= history.length) {
+								selectedIndex = Math.max(0, history.length - 1);
+							}
+							if (history.length === 0) {
+								done({ action: "cancel" });
+								return;
+							}
+							refresh();
+						}
+						return;
+					}
+
+					// Clear all
+					if (data === "c" || data === "C") {
+						confirmClear = true;
+						refresh();
+						return;
+					}
+
+					// Navigation
+					if (matchesKey(data, Key.up) || data === "k") {
+						selectedIndex = Math.max(0, selectedIndex - 1);
+						// Adjust scroll
+						if (selectedIndex < scrollOffset) {
+							scrollOffset = selectedIndex;
+						}
+						refresh();
+						return;
+					}
+
+					if (matchesKey(data, Key.down) || data === "j") {
+						selectedIndex = Math.min(history.length - 1, selectedIndex + 1);
+						// Adjust scroll
+						if (selectedIndex >= scrollOffset + maxVisible) {
+							scrollOffset = selectedIndex - maxVisible + 1;
+						}
+						refresh();
+						return;
+					}
+
+					// Page navigation
+					if (matchesKey(data, Key.pageUp)) {
+						selectedIndex = Math.max(0, selectedIndex - maxVisible);
+						scrollOffset = Math.max(0, scrollOffset - maxVisible);
+						refresh();
+						return;
+					}
+
+					if (matchesKey(data, Key.pageDown)) {
+						selectedIndex = Math.min(history.length - 1, selectedIndex + maxVisible);
+						scrollOffset = Math.min(Math.max(0, history.length - maxVisible), scrollOffset + maxVisible);
+						refresh();
+						return;
+					}
+
+					// Home/End
+					if (matchesKey(data, Key.home)) {
+						selectedIndex = 0;
+						scrollOffset = 0;
+						refresh();
+						return;
+					}
+
+					if (matchesKey(data, Key.end)) {
+						selectedIndex = history.length - 1;
+						scrollOffset = Math.max(0, history.length - maxVisible);
+						refresh();
+						return;
+					}
+				}
+
+				function render(width: number): string[] {
+					if (cachedLines) return cachedLines;
+
+					const lines: string[] = [];
+					const boxWidth = Math.min(90, width - 4);
+					const innerWidth = boxWidth - 4;
+
+					function topBorder(title: string) {
+						const titleLen = title.replace(/[^\x20-\x7E]/g, " ").length;
+						const remaining = boxWidth - 2 - titleLen;
+						return theme.fg("accent", "╭") + theme.fg("accent", theme.bold(title)) + theme.fg("accent", "─".repeat(remaining) + "╮");
+					}
+					function bottomBorder() {
+						return theme.fg("accent", "╰" + "─".repeat(boxWidth - 2) + "╯");
+					}
+					function divider() {
+						return theme.fg("accent", "├" + "─".repeat(boxWidth - 2) + "┤");
+					}
+					function row(content: string) {
+						const contentLen = content.replace(/\x1b\[[0-9;]*m/g, "").length;
+						const padding = Math.max(0, innerWidth - contentLen);
+						return theme.fg("accent", "│ ") + content + " ".repeat(padding) + theme.fg("accent", " │");
+					}
+
+					lines.push("");
+					lines.push(topBorder(" Request History "));
+
+					// Header
+					const countInfo = theme.fg("dim", `(${history.length} request${history.length !== 1 ? "s" : ""})`);
+					lines.push(row(countInfo));
+					lines.push(divider());
+
+					// Confirmation dialog
+					if (confirmClear) {
+						lines.push(row(""));
+						lines.push(row(theme.fg("warning", "  Clear all history? ") + theme.fg("dim", "(y/n)")));
+						lines.push(row(""));
+						lines.push(bottomBorder());
+						cachedLines = lines;
+						return lines;
+					}
+
+					// Details view
+					if (showDetails && history[selectedIndex]) {
+						const entry = history[selectedIndex];
+						const date = new Date(entry.timestamp);
+						
+						lines.push(row(theme.fg("text", theme.bold("  " + entry.method + " ") + entry.url)));
+						lines.push(row(""));
+						lines.push(row(theme.fg("muted", "  Date: ") + date.toLocaleString()));
+						
+						if (entry.endpoint) {
+							lines.push(row(theme.fg("muted", "  Endpoint: ") + "@" + entry.endpoint));
+						}
+						
+						if (entry.headers && Object.keys(entry.headers).length > 0) {
+							lines.push(row(""));
+							lines.push(row(theme.fg("muted", "  Headers:")));
+							for (const [k, v] of Object.entries(entry.headers)) {
+								const headerLine = `    ${k}: ${v}`;
+								const truncated = headerLine.length > innerWidth - 2 
+									? headerLine.slice(0, innerWidth - 5) + "..." 
+									: headerLine;
+								lines.push(row(theme.fg("dim", truncated)));
+							}
+						}
+						
+						if (entry.body) {
+							lines.push(row(""));
+							lines.push(row(theme.fg("muted", "  Body:")));
+							try {
+								const parsed = JSON.parse(entry.body);
+								const pretty = JSON.stringify(parsed, null, 2).split("\n");
+								for (const line of pretty.slice(0, 10)) {
+									const truncated = line.length > innerWidth - 4 
+										? line.slice(0, innerWidth - 7) + "..." 
+										: line;
+									lines.push(row(theme.fg("dim", "    " + truncated)));
+								}
+								if (pretty.length > 10) {
+									lines.push(row(theme.fg("dim", `    ... ${pretty.length - 10} more lines`)));
+								}
+							} catch {
+								const truncated = entry.body.length > innerWidth - 4
+									? entry.body.slice(0, innerWidth - 7) + "..."
+									: entry.body;
+								lines.push(row(theme.fg("dim", "    " + truncated)));
+							}
+						}
+						
+						lines.push(divider());
+						lines.push(row(
+							theme.fg("muted", "Enter") + theme.fg("dim", " replay  ") +
+							theme.fg("muted", "d") + theme.fg("dim", " back  ") +
+							theme.fg("muted", "Esc") + theme.fg("dim", " close")
+						));
+						lines.push(bottomBorder());
+						lines.push("");
+						
+						cachedLines = lines;
+						return lines;
+					}
+
+					// List view
+					const visibleHistory = history.slice(scrollOffset, scrollOffset + maxVisible);
+					
+					for (let i = 0; i < visibleHistory.length; i++) {
+						const entry = visibleHistory[i];
+						const actualIndex = scrollOffset + i;
+						const isSelected = actualIndex === selectedIndex;
+						
+						const date = new Date(entry.timestamp);
+						const timeStr = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
+						const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+						
+						// Method with color
+						const methodColors: Record<string, string> = {
+							GET: "success",
+							POST: "accent",
+							PUT: "warning",
+							PATCH: "warning",
+							DELETE: "error",
+						};
+						const methodColor = methodColors[entry.method] || "text";
+						const methodStr = theme.fg(methodColor as any, entry.method.padEnd(6));
+						
+						// URL (truncate if needed)
+						const url = entry.endpoint ? `@${entry.endpoint}` : entry.url;
+						const maxUrlLen = innerWidth - 30;
+						const truncatedUrl = url.length > maxUrlLen ? url.slice(0, maxUrlLen - 3) + "..." : url;
+						
+						// Timestamp
+						const timestamp = theme.fg("dim", `${dateStr} ${timeStr}`);
+						
+						const prefix = isSelected ? theme.fg("warning", "▸ ") : "  ";
+						const urlText = isSelected ? theme.fg("text", truncatedUrl) : theme.fg("muted", truncatedUrl);
+						
+						lines.push(row(prefix + methodStr + " " + urlText.padEnd(maxUrlLen) + "  " + timestamp));
+					}
+
+					// Scroll indicator
+					if (history.length > maxVisible) {
+						const scrollInfo = `${scrollOffset + 1}-${Math.min(scrollOffset + maxVisible, history.length)} of ${history.length}`;
+						lines.push(row(theme.fg("dim", "  " + scrollInfo)));
+					}
+
+					lines.push(divider());
+					
+					// Shortcuts
+					const shortcuts = [
+						theme.fg("muted", "↑↓") + theme.fg("dim", " nav"),
+						theme.fg("muted", "Enter") + theme.fg("dim", " replay"),
+						theme.fg("muted", "d") + theme.fg("dim", " details"),
+						theme.fg("muted", "x") + theme.fg("dim", " delete"),
+						theme.fg("muted", "c") + theme.fg("dim", " clear"),
+						theme.fg("muted", "Esc") + theme.fg("dim", " close"),
+					];
+					lines.push(row(shortcuts.join("  ")));
+					lines.push(bottomBorder());
+					lines.push("");
+
+					cachedLines = lines;
+					return lines;
+				}
+
+				return { render, invalidate: () => { cachedLines = undefined; }, handleInput };
+			});
+
+			if (result.action === "cancel") {
+				return;
+			}
+
+			if (result.action === "clear") {
+				ctx.ui.notify("History cleared", "info");
+				return;
+			}
+
+			if (result.action === "replay" && result.entry) {
+				const entry = result.entry;
+				config = loadConfig(ctx.cwd);
+
+				// Build the task for the subagent
+				let task = `${entry.method} ${entry.url}`;
+				
+				if (entry.body) {
+					task += ` with body ${entry.body}`;
+				}
+				
+				if (entry.headers && Object.keys(entry.headers).length > 0) {
+					const headerEntries = Object.entries(entry.headers);
+					task += ` with headers: ${headerEntries.map(([k, v]) => `${k}: ${v}`).join(", ")}`;
+				}
+
+				// Save new history entry for the replay
+				addToHistory({
+					method: entry.method,
+					url: entry.url,
+					body: entry.body,
+					headers: entry.headers,
+					endpoint: entry.endpoint,
+				});
+
+				// Delegate to api-tester subagent
+				pi.sendUserMessage(`Use subagent api-tester to test: ${task}`);
+			}
 		},
 	});
 

@@ -17,10 +17,20 @@ When the pi-super-curl extension is loaded, prefer using the `send_request` tool
 send_request with method="GET" url="https://httpbin.org/get"
 ```
 
-For named endpoints from `.super-curl.json`:
+For named endpoints from `.pi-super-curl/config.json`:
 ```
 send_request with method="GET" url="@health"
 ```
+
+## Important: Save Raw Output
+
+**Always** save raw output to `/tmp/generation-output.txt` for post-processing:
+
+```bash
+curl ... 2>&1 | tee /tmp/generation-output.txt
+```
+
+This enables the `/scurl-log` command to capture and process the response.
 
 ## Output Format
 

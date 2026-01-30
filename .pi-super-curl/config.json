@@ -1,0 +1,72 @@
+{
+  "baseUrl": "https://openrouter.ai/api/v1",
+  "timeout": 60000,
+  "envFile": ".env",
+  "auth": {
+    "type": "bearer",
+    "token": "$OPENROUTER_API_KEY"
+  },
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "endpoints": [
+    {
+      "name": "chat",
+      "url": "/chat/completions",
+      "method": "POST",
+      "defaultBody": {
+        "model": "openai/gpt-4o",
+        "messages": []
+      }
+    },
+    {
+      "name": "models",
+      "url": "/models",
+      "method": "GET"
+    }
+  ],
+  "templates": [
+    {
+      "name": "with-system",
+      "description": "Chat with system prompt",
+      "endpoint": "chat",
+      "body": {
+        "model": "openai/gpt-4o",
+        "messages": [
+          { "role": "system", "content": "" },
+          { "role": "user", "content": "" }
+        ],
+        "temperature": 0.7,
+        "max_tokens": 1000
+      },
+      "fields": [
+        {
+          "name": "system_prompt",
+          "label": "System Prompt",
+          "path": "messages[0].content"
+        },
+        {
+          "name": "prompt",
+          "label": "Prompt",
+          "path": "messages[1].content"
+        }
+      ]
+    },
+    {
+      "name": "quick-chat",
+      "description": "Quick chat message",
+      "endpoint": "chat",
+      "body": {
+        "model": "openai/gpt-4o",
+        "messages": [{ "role": "user", "content": "" }]
+      },
+      "fields": [
+        {
+          "name": "prompt",
+          "label": "Prompt",
+          "path": "messages[0].content"
+        }
+      ]
+    }
+  ]
+}
