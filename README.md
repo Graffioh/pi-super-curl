@@ -106,6 +106,48 @@ Capture logs after a request completes. Requires `customLogging` to be configure
 
 Creates a timestamped directory with all configured log files and optionally runs a post-processing script.
 
+## Suggested Workflow
+
+Once configured, pi-super-curl enables a powerful API request-debug workflow:
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                                                                         │
+│  /scurl  ──►  Send Request  ──►  Wait for Results  ──►  Ask Questions   │
+│                                                                         │
+│                                      │                                  │
+│                                      ▼                                  │
+│                                                                         │
+│                              /scurl-log  ──►  Parse & Save Logs         │
+│                                                                         │
+│                                      │                                  │
+│                                      ▼                                  │
+│                                                                         │
+│                        View in Custom Log Viewer (optional)             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **`/scurl`** - Build and send complex API requests in seconds using the interactive TUI
+2. **Wait for results** - The request executes via subagent, streaming response back to your session
+3. **Analyze in context** - Results and logs are now in your pi session — ask whatever you want about them
+4. **`/scurl-log`** - Parse logs from your services and save them to a timestamped output directory
+5. **View logs** - Use your preferred log viewer to inspect the captured data
+
+**Why this works:**
+
+- Your coding agent has full context of the request and response
+- No context-switching between external tools
+- Logs are organized and timestamped automatically
+- Post-processing scripts can transform raw logs into useful formats
+
+**Setup checklist:**
+
+1. Create `.pi-super-curl/config.json` with your endpoints and auth
+2. Configure `customLogging` with paths to your service logs
+3. (Optional) Add a `postScript` for custom log processing
+4. (Optional) Build a log viewer for your specific needs
+
 ## Configuration
 
 ### Named Endpoints
@@ -231,10 +273,10 @@ Capture logs after a request completes using `/scurl-log`. This is useful for de
 
 **Output Structure:**
 ```
-~/Desktop/morphic-generations/
+~/Desktop/custom-output-logs/
 └── 1706648123456/          # Unix timestamp
     ├── backend.txt         # Copied from logs.backend
-    └── workflow.txt        # Copied from logs.workflow
+    └── backend2.txt        # Copied from logs.backend2
 ```
 
 **Configuration:**
@@ -251,7 +293,7 @@ The `logs` field is flexible - define any log files you need:
 {
   "logs": {
     "backend": "/tmp/server.log",
-    "workflow": "logs/workflow.log",
+    "backend2": "logs/backend2.log",
     "debug": "/var/log/app-debug.log"
   }
 }
