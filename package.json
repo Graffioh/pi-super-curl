@@ -1,6 +1,6 @@
 {
   "name": "pi-super-curl",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "pi": {
     "extensions": ["./index.ts"]
   },

@@ -1,24 +1,10 @@
 # pi-super-curl
 
-A [pi coding agent](https://github.com/badlogic/pi-mono/) extension for sending HTTP requests with an interactive TUI request builder. Define your API once, test it with `/scurl` by using your coding agent capabilities.
+A [pi coding agent](https://github.com/badlogic/pi-mono/) extension for API testing with an interactive TUI. Define your endpoints once, test them with `/scurl`.
 
 https://github.com/user-attachments/assets/612542b1-5fd0-4cd5-a02e-9384cab9cc98
 
-Still work in progress.
-
-## Why
-
-API testing during development is repetitive. You're constantly:
-- Copying auth tokens between tools
-- Regenerating expired JWTs
-- Retyping the same endpoints
-- Coding agent don't have request <-> response context if called externally
-
-pi super curl gives you a Postman-like request builder right in your coding agent:
-
-```
-/scurl
-```
+> ⚠️ Work in progress
 
 ## Install
 
@@ -26,163 +12,116 @@ pi super curl gives you a Postman-like request builder right in your coding agen
 pi install npm:pi-super-curl
 ```
 
-### Auto-Setup
+The extension auto-creates symlinks for the `send-request` skill and `api-tester` agent.
 
-When the extension loads, it automatically creates symlinks for:
-- **`send-request` skill** → `~/.pi/agent/skills/send-request/`
-- **`api-tester` agent** → `~/.pi/agent/agents/api-tester.md`
-
-This enables the `api-tester` subagent to use the `send-request` skill for reliable HTTP requests with proper UUID generation, JWT auth, and template variable resolution.
-
-### Manual Setup (if auto-setup fails)
-
-If the symlinks weren't created (e.g., permissions), create them manually:
+<details>
+<summary>Manual setup (if auto-setup fails)</summary>
 
 ```bash
-# Find where pi-super-curl was installed (use -L to follow symlinks)
 EXT_DIR=$(find -L ~/.pi -path "*/pi-super-curl/skills" -type d 2>/dev/null | head -1 | sed 's|/skills||')
-
-# Create skill symlink
 ln -s "$EXT_DIR/skills/send-request" ~/.pi/agent/skills/send-request
-
-# Create agent symlink  
 ln -s "$EXT_DIR/agents/api-tester.md" ~/.pi/agent/agents/api-tester.md
 ```
+</details>
 
 ## Quick Start
 
-1. Create `.pi-super-curl/` directory in your project:
-
-```
-your-project/
-├── .env                     # Environment variables (secrets, IDs)
-└── .pi-super-curl/
-    ├── config.json          # Configuration
-    └── my-script.js         # Custom post-processing scripts (optional)
-```
-
-2. Configure your endpoints in `config.json`:
+1. Create `.pi-super-curl/config.json` in your project:
 
 ```json
 {
   "baseUrl": "$API_BASE_URL",
   "envFile": ".env",
   "auth": {
-    "type": "jwt",
-    "secret": "$JWT_SECRET",
-    "expiresIn": 3600,
-    "payload": {
-      "user_id": "{{env.USER_ID}}",
-      "role": "authenticated"
-    }
+    "type": "bearer",
+    "token": "$API_TOKEN"
   },
   "endpoints": [
-    {
-      "name": "...",
-      "url": "...",
-      "method": "..."
-    }
+    { "name": "get-users", "url": "/users", "method": "GET" },
+    { "name": "create-user", "url": "/users", "method": "POST" }
   ]
 }
 ```
 
-2. Run `/scurl` to open the request builder
+2. Create a `.env` file with your secrets:
+
+```bash
+API_BASE_URL=http://localhost:3000
+API_TOKEN=your-token-here
+```
+
+3. Run `/scurl` and start testing!
 
 ## Commands
 
-### `/scurl`
+| Command | Description |
+|---------|-------------|
+| `/scurl` | Open the request builder |
+| `/scurl-history` | Browse and replay recent requests |
+| `/scurl-log` | Capture logs after a request (requires `customLogging` config) |
 
-Opens the interactive request builder UI. Build your request visually, then delegates execution to the `api-tester` subagent for a concise summary.
+### `/scurl` Keybindings
 
-- **Ctrl+T** - Switch between Default and Template modes
-- **Ctrl+U** - Import from cURL command (opens popup)
-- **Tab** - Navigate between fields
-- **↑↓** - Change options (endpoints, methods) or scroll body content
-- **Enter** - Send request
+| Key | Action |
+|-----|--------|
+| **Tab** | Navigate fields |
+| **↑↓** | Change options or scroll body |
+| **Enter** | Send request |
+| **Ctrl+T** | Switch Default/Template mode |
+| **Ctrl+U** | Import from cURL command |
 
-#### cURL Import
+### `/scurl-history` Keybindings
 
-Press **Ctrl+U** to open the import popup, paste a cURL command, and press **Ctrl+Enter** to parse and populate the form. Supports:
+| Key | Action |
+|-----|--------|
+| **↑↓** or **j/k** | Navigate |
+| **Enter** | Replay request |
+| **d** | Toggle details |
+| **x** | Delete entry |
+| **c** | Clear all |
 
-```bash
-curl -X POST https://api.example.com/endpoint \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer token123' \
-  -d '{"key": "value"}'
+## Configuration Reference
+
+### Authentication Types
+
+```json
+// Bearer token
+{ "auth": { "type": "bearer", "token": "$API_TOKEN" } }
+
+// API key (custom header)
+{ "auth": { "type": "api-key", "token": "$API_KEY", "header": "X-API-Key" } }
+
+// Basic auth
+{ "auth": { "type": "basic", "username": "$USER", "password": "$PASS" } }
+
+// JWT (auto-generated per request)
+{
+  "auth": {
+    "type": "jwt",
+    "secret": "$JWT_SECRET",
+    "expiresIn": 3600,
+    "payload": { "user_id": "{{env.USER_ID}}", "role": "authenticated" }
+  }
+}
 ```
 
-The parser handles:
-- `-X` / `--request` for HTTP method
-- `-H` / `--header` for headers
-- `-d` / `--data` / `--data-raw` for request body
-- `--json` shorthand
-- Quoted strings and escaped characters
-- Multi-line commands with `\` continuations
+### Template Variables
 
-### `/scurl-history`
+Use these anywhere in URLs, headers, or body:
 
-Browse and replay your recent requests. History is stored in `~/.super-curl-history.json` (last 50 requests).
+| Variable | Description |
+|----------|-------------|
+| `{{uuid}}` | Random UUID v4 |
+| `{{uuidv7}}` | Time-ordered UUID v7 |
+| `{{timestamp}}` | Unix timestamp (seconds) |
+| `{{timestamp_ms}}` | Unix timestamp (ms) |
+| `{{date}}` | ISO date string |
+| `{{env.VAR}}` or `{{$VAR}}` | Environment variable |
 
-- **↑↓** or **j/k** - Navigate through history
-- **Enter** - Replay selected request
-- **d** - Toggle details view (shows full body, headers)
-- **x** or **Backspace** - Delete selected entry
-- **c** - Clear all history
-- **Esc** - Close
+> **Note:** Use `$VAR` syntax for top-level config fields (`baseUrl`, `auth.token`, `auth.secret`).  
+> Use `{{env.VAR}}` syntax inside URLs, headers, body, and JWT payloads.
 
-### `/scurl-log`
-
-Capture logs after a request completes. Requires `customLogging` to be configured (see [Custom Logging](#custom-logging-project-specific)).
-
-Creates a timestamped directory with all configured log files and optionally runs a post-processing script.
-
-## Suggested Workflow
-
-Once configured, pi-super-curl enables a powerful API request-debug workflow:
-
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                                                                         │
-│  /scurl  ──►  Send Request  ──►  Wait for Results  ──►  Ask Questions   │
-│                                                                         │
-│                                      │                                  │
-│                                      ▼                                  │
-│                                                                         │
-│                              /scurl-log  ──►  Parse & Save Logs         │
-│                                                                         │
-│                                      │                                  │
-│                                      ▼                                  │
-│                                                                         │
-│                        View in Custom Log Viewer (optional)             │
-│                                                                         │
-└─────────────────────────────────────────────────────────────────────────┘
-```
-
-1. **`/scurl`** - Build and send complex API requests in seconds using the interactive TUI
-2. **Wait for results** - The request executes via subagent, streaming response back to your session
-3. **Analyze in context** - Results and logs are now in your pi session — ask whatever you want about them
-4. **`/scurl-log`** - Parse logs from your services and save them to a timestamped output directory
-5. **View logs** - Use your preferred log viewer to inspect the captured data
-
-**Why this works:**
-
-- Your coding agent has full context of the request and response
-- No context-switching between external tools
-- Logs are organized and timestamped automatically
-- Post-processing scripts can transform raw logs into useful formats
-
-**Setup checklist:**
-
-1. Create `.pi-super-curl/config.json` with your endpoints and auth
-2. Configure `customLogging` with paths to your service logs
-3. (Optional) Add a `postScript` for custom log processing
-4. (Optional) Build a log viewer for your specific needs
-
-## Configuration
-
-### Named Endpoints
-
-Define frequently-used endpoints:
+### Endpoints with Default Body
 
 ```json
 {
@@ -200,9 +139,9 @@ Define frequently-used endpoints:
 }
 ```
 
-### Templates
+### Templates (Quick Forms)
 
-Create quick-access templates with custom text fields so that you can reuse common API requests in a blink:
+Create reusable request templates with custom input fields:
 
 ```json
 {
@@ -212,181 +151,49 @@ Create quick-access templates with custom text fields so that you can reuse comm
       "description": "Send a chat message",
       "endpoint": "chat",
       "fields": [
-        {
-          "name": "message",
-          "label": "Your message",
-          "path": "messages[0].content"
-        }
+        { "name": "message", "label": "Your message", "path": "messages[0].content" }
       ]
     }
   ]
 }
 ```
 
-Check `example.pi-super-curl/config.json` in this project to see a full configuration example.
+Press **Ctrl+T** in `/scurl` to switch to Template mode.
 
-### Authentication
+### Custom Logging
 
-**Bearer Token:**
-```json
-{ "auth": { "type": "bearer", "token": "$API_TOKEN" } }
-```
-
-**API Key:**
-```json
-{ "auth": { "type": "api-key", "token": "$API_KEY", "header": "X-API-Key" } }
-```
-
-**Basic Auth:**
-```json
-{ "auth": { "type": "basic", "username": "$USER", "password": "$PASS" } }
-```
-
-**JWT (auto-generated per request):**
-```json
-{
-  "auth": {
-    "type": "jwt",
-    "secret": "$JWT_SECRET",
-    "expiresIn": 3600,
-    "payload": {
-      "user_id": "{{env.USER_ID}}",
-      "role": "authenticated"
-    }
-  }
-}
-```
-
-### Template Variables
-
-Dynamic values in URLs, headers, and body:
-
-| Template | Description |
-|----------|-------------|
-| `{{uuid}}` | Random UUID v4 |
-| `{{uuidv7}}` | Time-ordered UUID v7 |
-| `{{timestamp}}` | Unix timestamp (seconds) |
-| `{{timestamp_ms}}` | Unix timestamp (ms) |
-| `{{date}}` | ISO date string |
-| `{{env.VAR}}` or `{{$VAR}}` | Environment variables |
-
-### Environment File
-
-Load environment variables from a `.env` file:
-
-```json
-{
-  "envFile": ".env"
-}
-```
-
-**Two syntaxes for env vars:**
-
-| Syntax | Use in | Example |
-|--------|--------|---------|
-| `$VAR` | `baseUrl`, `auth.secret`, `auth.token` | `"baseUrl": "$API_URL"` |
-| `{{env.VAR}}` or `{{$VAR}}` | URLs, headers, body, JWT payload | `"user_id": "{{env.USER_ID}}"` |
-
-Example `.env` file:
-```bash
-API_BASE_URL=http://localhost:3000
-JWT_SECRET=your-secret-key
-USER_ID=user-123
-ORG_ID=org-456
-```
-
-### Custom Logging (Project-Specific)
-
-Capture logs after a request completes using `/scurl-log`. This is useful for debugging and keeping a history of API responses with associated log files.
+Capture server logs after requests for debugging:
 
 ```json
 {
   "customLogging": {
     "enabled": true,
-    "outputDir": "~/Desktop/api-generations",
+    "outputDir": "~/Desktop/api-logs",
     "logs": {
-      "backend": "/tmp/generation-output.txt",
-      "workflow": "apps/orcrust/.next/dev/logs/next-development.log"
+      "backend": "/tmp/server.log",
+      "app": "logs/app.log"
     },
-    "postScript": ".scripts/process-generation.js"
+    "postScript": "process-logs.js" 
   }
 }
 ```
 
-**Workflow:**
-1. Run `/scurl` to send request (via subagent)
-2. Wait for request to complete
-3. Run `/scurl-log` to capture logs
+Run `/scurl-log` after a request to save timestamped logs to `outputDir`.
 
-**Output Structure:**
-```
-~/Desktop/custom-output-logs/
-└── 1706648123456/          # Unix timestamp
-    ├── backend.txt         # Copied from logs.backend
-    └── backend2.txt        # Copied from logs.backend2
-```
-
-**Configuration:**
-
-| Field | Description |
-|-------|-------------|
-| `enabled` | Enable the `/scurl-log` command |
-| `outputDir` | Directory to save outputs (supports `~`) |
-| `logs` | Map of log names to file paths (copied as `<name>.txt`) |
-| `postScript` | Optional script to run after logging (receives output dir as argument) |
-
-The `logs` field is flexible - define any log files you need:
-```json
-{
-  "logs": {
-    "backend": "/tmp/server.log",
-    "backend2": "logs/backend2.log",
-    "debug": "/var/log/app-debug.log"
-  }
-}
-```
-
-**Post-Processing Script:**
-
-For custom processing (e.g., parsing SSE responses, downloading from GCS), provide a `postScript`. Scripts are resolved relative to the config directory (`.pi-super-curl/`):
-
-```
-your-project/
-└── .pi-super-curl/
-    ├── config.json
-    └── process-output.js    # Referenced as "process-output.js" in config
-```
-
-```json
-{
-  "customLogging": {
-    "enabled": true,
-    "outputDir": "~/Desktop/generations",
-    "logs": { "backend": "/tmp/output.txt" },
-    "postScript": "process-output.js"
-  }
-}
-```
-
-The script receives the output directory path as its first argument:
-```javascript
-#!/usr/bin/env bun
-const outputDir = process.argv[2];
-// Parse logs, download files, etc.
-```
-
-### Full Configuration Options
+### All Config Options
 
 | Option | Description | Default |
 |--------|-------------|---------|
-| `baseUrl` | Base URL for relative paths (supports `$VAR` env syntax) | - |
-| `timeout` | Request timeout in ms | 30000 |
+| `baseUrl` | Base URL for relative paths | - |
+| `timeout` | Request timeout (ms) | 30000 |
 | `envFile` | Path to .env file | - |
 | `auth` | Authentication config | - |
-| `headers` | Default headers | - |
+| `headers` | Default headers for all requests | - |
 | `endpoints` | Named endpoint definitions | - |
 | `templates` | Quick-access templates | - |
-| `customLogging` | Project-specific logging (see below) | - |
+| `customLogging` | Log capture config | - |
+
+See `example.pi-super-curl/config.json` for a complete example.
 
 ## License
 
