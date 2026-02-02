@@ -57,6 +57,7 @@
       "name": "quick-chat",
       "description": "Send a chat message",
       "endpoint": "chat",
+      "appendField": true,
       "fields": [
         {
           "name": "prompt",

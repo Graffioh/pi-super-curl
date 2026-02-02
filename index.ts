@@ -77,6 +77,8 @@ interface TemplateFieldConfig {
 	path?: string;          // JSON path to inject value (e.g., "generation_params.positive_prompt")
 	required?: boolean;     // Whether field is required
 	default?: string;       // Default value
+	appendTo?: string;      // Name of another field to append this value to (instead of using path)
+	appendFormat?: string;  // Format string when appending, use {value} as placeholder (default: "\n\n{value}")
 }
 
 // Template: pre-configured request for quick access
@@ -87,6 +89,7 @@ interface TemplateConfig {
 	body?: Record<string, unknown>; // Overrides/merges with endpoint's defaultBody
 	headers?: Record<string, string>; // Extra headers
 	fields?: TemplateFieldConfig[]; // User-defined input fields
+	appendField?: boolean; // Auto-add "Additional Instructions" field that appends to first field
 }
 
 // Parsed SSE result for streaming responses
@@ -967,6 +970,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				bodyOverrides?: Record<string, unknown>;
 				extraHeaders?: Record<string, string>;
 				fields?: TemplateFieldConfig[];
+				appendField?: boolean;
 			}
 			
 			const templateOptions: TemplateOption[] = [];
@@ -982,6 +986,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 						bodyOverrides: tpl.body,
 						extraHeaders: tpl.headers,
 						fields: tpl.fields,
+						appendField: tpl.appendField,
 					});
 				}
 			} else {
@@ -1067,6 +1072,15 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					path: "generation_params.positive_prompt",
 				};
 				
+				// Auto-generated instructions field for appendField: true
+				const autoInstructionsField: TemplateFieldConfig = {
+					name: "instructions",
+					label: "Additional Instructions",
+					hint: "Appended to prompt",
+					appendTo: "prompt",
+					appendFormat: "\n\nAdditional instructions: {value}",
+				};
+				
 				function getTemplateFields(): string[] {
 					const fields = ["endpoint"];
 					const tpl = templateOptions[endpointIndex];
@@ -1075,14 +1089,32 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					} else {
 						fields.push("prompt");
 					}
+					// Add instructions field if appendField is enabled
+					if (tpl?.appendField) {
+						fields.push("instructions");
+					}
 					fields.push("body");
 					return fields;
 				}
 				
 				function getTemplateFieldConfigs(): TemplateFieldConfig[] {
 					const tpl = templateOptions[endpointIndex];
-					if (tpl?.fields && tpl.fields.length > 0) return tpl.fields;
-					return [defaultPromptField];
+					let configs: TemplateFieldConfig[] = [];
+					if (tpl?.fields && tpl.fields.length > 0) {
+						configs = [...tpl.fields];
+					} else {
+						configs = [defaultPromptField];
+					}
+					// Auto-add instructions field if appendField is enabled
+					if (tpl?.appendField) {
+						// Find the first field to use as appendTo target
+						const firstFieldName = configs[0]?.name || "prompt";
+						configs.push({
+							...autoInstructionsField,
+							appendTo: firstFieldName,
+						});
+					}
+					return configs;
 				}
 				
 				function getCurrentTemplateField(): string {
@@ -1219,12 +1251,34 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 						const fieldConfigs = getTemplateFieldConfigs();
 						try {
 							const body = bodyText ? JSON.parse(bodyText) : {};
+							
+							// First pass: collect all field values
+							const fieldValues: Map<string, string> = new Map();
 							for (const fieldConfig of fieldConfigs) {
-								if (!fieldConfig.path) continue;
 								const editor = fieldEditors.get(fieldConfig.name);
 								const value = editor?.getText().trim() || "";
+								fieldValues.set(fieldConfig.name, value);
+							}
+							
+							// Second pass: process appendTo fields (append their value to target field)
+							for (const fieldConfig of fieldConfigs) {
+								if (!fieldConfig.appendTo) continue;
+								const appendValue = fieldValues.get(fieldConfig.name) || "";
+								if (!appendValue) continue; // Skip if nothing to append
+								
+								const targetValue = fieldValues.get(fieldConfig.appendTo) || "";
+								const format = fieldConfig.appendFormat || "\n\n{value}";
+								const formattedAppend = format.replace("{value}", appendValue);
+								fieldValues.set(fieldConfig.appendTo, targetValue + formattedAppend);
+							}
+							
+							// Third pass: set values at their paths (skip appendTo fields as they don't have their own path)
+							for (const fieldConfig of fieldConfigs) {
+								if (!fieldConfig.path || fieldConfig.appendTo) continue;
+								const value = fieldValues.get(fieldConfig.name) || "";
 								if (value) setAtPath(body, fieldConfig.path, value);
 							}
+							
 							return JSON.stringify(body);
 						} catch {
 							return bodyText;
