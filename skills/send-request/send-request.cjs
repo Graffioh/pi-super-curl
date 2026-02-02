@@ -611,12 +611,173 @@ Examples:
       console.error(`[INFO] Saved to ${filepath}`);
     }
 
+    // Handle customLogging if enabled
+    if (config.customLogging?.enabled) {
+      await processCustomLogging(config, response.body, parsed.configPath);
+    }
+
     console.error('[INFO] Request completed successfully');
     process.exit(isSuccess ? 0 : 1);
 
   } catch (error) {
     console.error(`[ERROR] Request failed: ${error.message}`);
     process.exit(1);
+  }
+}
+
+// Process custom logging - create output directory, copy logs, run postScript
+async function processCustomLogging(config, responseBody, configPath) {
+  const customLogging = config.customLogging;
+  if (!customLogging) return;
+
+  try {
+    // Resolve output directory (expand ~)
+    let outputDir = customLogging.outputDir || '~/Desktop/api-responses';
+    if (outputDir.startsWith('~')) {
+      outputDir = path.join(os.homedir(), outputDir.slice(1));
+    }
+
+    // Create timestamped subdirectory
+    const timestamp = Date.now();
+    const runDir = path.join(outputDir, String(timestamp));
+    fs.mkdirSync(runDir, { recursive: true });
+
+    console.error(`[INFO] CustomLogging: Created ${runDir}`);
+
+    // Save backend response
+    const backendLogPath = path.join(runDir, 'backend.txt');
+    fs.writeFileSync(backendLogPath, responseBody);
+    console.error(`[INFO] CustomLogging: Saved backend.txt`);
+
+    // Copy workflow logs if specified
+    if (customLogging.logs?.workflow) {
+      let workflowLogPath = customLogging.logs.workflow;
+      
+      // Resolve relative paths from config directory
+      if (!path.isAbsolute(workflowLogPath)) {
+        // Find the config directory
+        let configDir = process.cwd();
+        if (configPath) {
+          configDir = path.dirname(path.dirname(configPath));
+        } else {
+          // Walk up to find .pi-super-curl
+          let dir = process.cwd();
+          while (dir !== path.dirname(dir)) {
+            if (fs.existsSync(path.join(dir, '.pi-super-curl', 'config.json'))) {
+              configDir = dir;
+              break;
+            }
+            dir = path.dirname(dir);
+          }
+        }
+        workflowLogPath = path.join(configDir, workflowLogPath);
+      }
+
+      if (fs.existsSync(workflowLogPath)) {
+        const workflowContent = fs.readFileSync(workflowLogPath, 'utf-8');
+        fs.writeFileSync(path.join(runDir, 'workflow.txt'), workflowContent);
+        console.error(`[INFO] CustomLogging: Copied workflow.txt`);
+      } else {
+        console.error(`[WARN] CustomLogging: Workflow log not found at ${workflowLogPath}`);
+      }
+    }
+
+    // Run postScript if specified
+    if (customLogging.postScript) {
+      let postScriptPath = customLogging.postScript;
+      
+      // Resolve relative paths - postScript is relative to .pi-super-curl directory
+      if (!path.isAbsolute(postScriptPath)) {
+        let configDir = process.cwd();
+        if (configPath) {
+          configDir = path.dirname(configPath); // .pi-super-curl directory
+        } else {
+          // Walk up to find .pi-super-curl
+          let dir = process.cwd();
+          while (dir !== path.dirname(dir)) {
+            const piSuperCurlDir = path.join(dir, '.pi-super-curl');
+            if (fs.existsSync(path.join(piSuperCurlDir, 'config.json'))) {
+              configDir = piSuperCurlDir;
+              break;
+            }
+            dir = path.dirname(dir);
+          }
+        }
+        postScriptPath = path.join(configDir, postScriptPath);
+      }
+
+      if (fs.existsSync(postScriptPath)) {
+        console.error(`[INFO] CustomLogging: Running postScript ${postScriptPath}`);
+        
+        const { spawn } = require('child_process');
+        
+        // Determine how to run the script
+        let cmd, args;
+        if (postScriptPath.endsWith('.js') || postScriptPath.endsWith('.cjs')) {
+          // Check shebang for bun
+          const scriptContent = fs.readFileSync(postScriptPath, 'utf-8');
+          if (scriptContent.startsWith('#!/usr/bin/env bun')) {
+            cmd = 'bun';
+          } else {
+            cmd = 'node';
+          }
+          args = [postScriptPath, runDir];
+        } else {
+          cmd = postScriptPath;
+          args = [runDir];
+        }
+
+        // Run asynchronously but wait for completion
+        await new Promise((resolve, reject) => {
+          const child = spawn(cmd, args, {
+            stdio: ['pipe', 'pipe', 'pipe'],
+            cwd: path.dirname(postScriptPath),
+          });
+
+          let stdout = '';
+          let stderr = '';
+
+          child.stdout.on('data', (data) => {
+            stdout += data;
+          });
+
+          child.stderr.on('data', (data) => {
+            stderr += data;
+          });
+
+          child.on('close', (code) => {
+            if (stdout) {
+              for (const line of stdout.trim().split('\n')) {
+                console.error(`[PostScript] ${line}`);
+              }
+            }
+            if (stderr) {
+              for (const line of stderr.trim().split('\n')) {
+                console.error(`[PostScript] ${line}`);
+              }
+            }
+            
+            if (code === 0 || code === 2) {
+              // 0 = success, 2 = already processed (from process-generation.js)
+              resolve();
+            } else {
+              console.error(`[WARN] CustomLogging: postScript exited with code ${code}`);
+              resolve(); // Don't fail the main request
+            }
+          });
+
+          child.on('error', (err) => {
+            console.error(`[WARN] CustomLogging: postScript error: ${err.message}`);
+            resolve(); // Don't fail the main request
+          });
+        });
+      } else {
+        console.error(`[WARN] CustomLogging: postScript not found at ${postScriptPath}`);
+      }
+    }
+  } catch (error) {
+    console.error(`[WARN] CustomLogging error: ${error.message}`);
+    // Don't fail the main request
   }
 }
 

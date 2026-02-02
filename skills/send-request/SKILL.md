@@ -17,8 +17,8 @@ Sends HTTP requests with:
 Run the `send-request.cjs` script with request parameters:
 
 ```bash
-# First, find the script path
-SCRIPT=$(find ~/.pi -path "*/pi-super-curl/skills/send-request/send-request.cjs" 2>/dev/null | head -1)
+# First, find the script path (use -L to follow symlinks)
+SCRIPT=$(find -L ~/.pi/agent/skills -name "send-request.cjs" 2>/dev/null | head -1)
 
 # Then use it
 node "$SCRIPT" <METHOD> "<URL>" [options] 2>&1

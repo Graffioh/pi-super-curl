@@ -39,8 +39,8 @@ This enables the `api-tester` subagent to use the `send-request` skill for relia
 If the symlinks weren't created (e.g., permissions), create them manually:
 
 ```bash
-# Find where pi-super-curl was installed
-EXT_DIR=$(find ~/.pi -path "*/pi-super-curl/skills" -type d 2>/dev/null | head -1 | sed 's|/skills||')
+# Find where pi-super-curl was installed (use -L to follow symlinks)
+EXT_DIR=$(find -L ~/.pi -path "*/pi-super-curl/skills" -type d 2>/dev/null | head -1 | sed 's|/skills||')
 
 # Create skill symlink
 ln -s "$EXT_DIR/skills/send-request" ~/.pi/agent/skills/send-request
