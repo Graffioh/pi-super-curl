@@ -1,8 +1,9 @@
 {
   "name": "pi-super-curl",
-  "version": "1.0.8",
+  "version": "1.0.9",
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./index.ts"],
+    "video": "https://github.com/user-attachments/assets/612542b1-5fd0-4cd5-a02e-9384cab9cc98"
   },
   "description": "HTTP request extension for pi shitty coding agent with auto-config, JWT generation, and named endpoints",
   "type": "module",

@@ -77,8 +77,7 @@ interface TemplateFieldConfig {
 	path?: string;          // JSON path to inject value (e.g., "generation_params.positive_prompt")
 	required?: boolean;     // Whether field is required
 	default?: string;       // Default value
-	appendTo?: string;      // Name of another field to append this value to (instead of using path)
-	appendFormat?: string;  // Format string when appending, use {value} as placeholder (default: "\n\n{value}")
+	sendToAgent?: boolean;  // If true, this field's value is sent to the calling agent (pi), not included in request body
 }
 
 // Template: pre-configured request for quick access
@@ -141,6 +140,7 @@ interface RequestBuilderResult {
 	headers: string;
 	cancelled: boolean;
 	endpoint?: string; // Selected endpoint name
+	agentInstructions?: string; // Instructions to pass to the calling agent (not included in request body)
 }
 
 // History entry for storing past requests
@@ -1076,9 +1076,8 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				const autoInstructionsField: TemplateFieldConfig = {
 					name: "instructions",
 					label: "Additional Instructions",
-					hint: "Appended to prompt",
-					appendTo: "prompt",
-					appendFormat: "\n\nAdditional instructions: {value}",
+					hint: "Sent to pi agent",
+					sendToAgent: true,
 				};
 				
 				function getTemplateFields(): string[] {
@@ -1107,12 +1106,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					}
 					// Auto-add instructions field if appendField is enabled
 					if (tpl?.appendField) {
-						// Find the first field to use as appendTo target
-						const firstFieldName = configs[0]?.name || "prompt";
-						configs.push({
-							...autoInstructionsField,
-							appendTo: firstFieldName,
-						});
+						configs.push(autoInstructionsField);
 					}
 					return configs;
 				}
@@ -1245,7 +1239,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					(current as Record<string, unknown>)[lastSeg as string] = value;
 				}
 
-				function buildFinalBody(): string {
+				function buildFinalBody(): { body: string; agentInstructions?: string } {
 					const bodyText = bodyEditor.getText().trim();
 					if (mode === "template") {
 						const fieldConfigs = getTemplateFieldConfigs();
@@ -1260,31 +1254,31 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 								fieldValues.set(fieldConfig.name, value);
 							}
 							
-							// Second pass: process appendTo fields (append their value to target field)
+							// Second pass: collect sendToAgent fields as agent instructions (NOT included in body)
+							// These are instructions meant for the calling agent (pi), not the HTTP request
+							const agentInstructionParts: string[] = [];
 							for (const fieldConfig of fieldConfigs) {
-								if (!fieldConfig.appendTo) continue;
-								const appendValue = fieldValues.get(fieldConfig.name) || "";
-								if (!appendValue) continue; // Skip if nothing to append
-								
-								const targetValue = fieldValues.get(fieldConfig.appendTo) || "";
-								const format = fieldConfig.appendFormat || "\n\n{value}";
-								const formattedAppend = format.replace("{value}", appendValue);
-								fieldValues.set(fieldConfig.appendTo, targetValue + formattedAppend);
+								if (!fieldConfig.sendToAgent) continue;
+								const value = fieldValues.get(fieldConfig.name) || "";
+								if (value) agentInstructionParts.push(value);
 							}
 							
-							// Third pass: set values at their paths (skip appendTo fields as they don't have their own path)
+							// Third pass: set values at their paths (skip sendToAgent fields)
 							for (const fieldConfig of fieldConfigs) {
-								if (!fieldConfig.path || fieldConfig.appendTo) continue;
+								if (!fieldConfig.path || fieldConfig.sendToAgent) continue;
 								const value = fieldValues.get(fieldConfig.name) || "";
 								if (value) setAtPath(body, fieldConfig.path, value);
 							}
 							
-							return JSON.stringify(body);
+							return {
+								body: JSON.stringify(body),
+								agentInstructions: agentInstructionParts.length > 0 ? agentInstructionParts.join("\n") : undefined,
+							};
 						} catch {
-							return bodyText;
+							return { body: bodyText };
 						}
 					}
-					return bodyText;
+					return { body: bodyText };
 				}
 
 				function getUrl(): string {
@@ -1296,13 +1290,15 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				}
 
 				function submit() {
+					const { body, agentInstructions } = buildFinalBody();
 					done({
 						method: METHODS[methodIndex],
 						url: getUrl(),
-						body: buildFinalBody(),
+						body,
 						headers: headersEditor.getText().trim(),
 						cancelled: false,
 						endpoint: mode === "template" ? templateOptions[endpointIndex]?.name : undefined,
+						agentInstructions,
 					});
 				}
 
@@ -1762,8 +1758,14 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				endpoint: result.endpoint,
 			});
 
+			// Build the full message - agent instructions are for pi (the calling agent), not the HTTP request
+			let message = `Use subagent api-tester to test: ${task}`;
+			if (result.agentInstructions) {
+				message += `\n\nAdditional instructions for you (pi): ${result.agentInstructions}`;
+			}
+
 			// Delegate to api-tester subagent
-			pi.sendUserMessage(`Use subagent api-tester to test: ${task}`);
+			pi.sendUserMessage(message);
 		},
 	});
 
