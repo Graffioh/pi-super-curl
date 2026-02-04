@@ -1,35 +1,45 @@
 {
-  "baseUrl": "https://openrouter.ai/api/v1",
-  "timeout": 60000,
-  "envFile": ".env",
-  "auth": {
-    "type": "bearer",
-    "token": "$OPENROUTER_API_KEY"
-  },
-  "headers": {
-    "Content-Type": "application/json"
-  },
-  "endpoints": [
-    {
-      "name": "chat",
-      "url": "/chat/completions",
-      "method": "POST",
-      "defaultBody": {
-        "model": "openai/gpt-4o",
-        "messages": []
-      }
+  "defaults": {
+    "baseUrl": "https://openrouter.ai/api/v1",
+    "timeout": 60000,
+    "envFile": ".env",
+    "headers": {
+      "Content-Type": "application/json"
     },
-    {
-      "name": "models",
-      "url": "/models",
-      "method": "GET"
+    "auth": {
+      "type": "bearer",
+      "token": "$OPENROUTER_API_KEY"
     }
-  ],
+  },
   "templates": [
     {
-      "name": "with-system",
+      "name": "list-models",
+      "description": "List available models",
+      "url": "/models",
+      "method": "GET"
+    },
+    {
+      "name": "quick-chat",
+      "description": "Quick chat message",
+      "url": "/chat/completions",
+      "method": "POST",
+      "body": {
+        "model": "openai/gpt-4o",
+        "messages": [{ "role": "user", "content": "" }]
+      },
+      "fields": [
+        {
+          "name": "prompt",
+          "label": "Prompt",
+          "path": "messages[0].content"
+        }
+      ]
+    },
+    {
+      "name": "chat-with-system",
       "description": "Chat with system prompt",
-      "endpoint": "chat",
+      "url": "/chat/completions",
+      "method": "POST",
       "body": {
         "model": "openai/gpt-4o",
         "messages": [
@@ -49,22 +59,6 @@
           "name": "prompt",
           "label": "Prompt",
           "path": "messages[1].content"
-        }
-      ]
-    },
-    {
-      "name": "quick-chat",
-      "description": "Quick chat message",
-      "endpoint": "chat",
-      "body": {
-        "model": "openai/gpt-4o",
-        "messages": [{ "role": "user", "content": "" }]
-      },
-      "fields": [
-        {
-          "name": "prompt",
-          "label": "Prompt",
-          "path": "messages[0].content"
         }
       ]
     }

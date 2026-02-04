@@ -1,6 +1,6 @@
 {
   "name": "pi-super-curl",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "pi": {
     "extensions": ["./index.ts"],
     "video": "https://raw.githubusercontent.com/Graffioh/pi-super-curl/main/demo.mp4"
