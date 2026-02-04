@@ -4,3 +4,5 @@
 node_modules/
 bun.lock
 tsconfig.json
+dist/
+demo.mp4
