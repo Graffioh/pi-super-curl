@@ -498,13 +498,17 @@ Examples:
   let body = parsed.body;
   let endpoint = null;
 
-  // Handle named endpoints (@name)
+  // Handle named endpoints (@name) - check both endpoints and templates
   if (url.startsWith('@')) {
     const endpointName = url.slice(1);
-    endpoint = config.endpoints?.find(e => e.name === endpointName);
+    // Check endpoints first, then templates
+    endpoint = config.endpoints?.find(e => e.name === endpointName) 
+            || config.templates?.find(e => e.name === endpointName);
     
     if (!endpoint) {
-      const available = config.endpoints?.map(e => e.name).join(', ') || 'none';
+      const endpointNames = config.endpoints?.map(e => e.name) || [];
+      const templateNames = config.templates?.map(e => e.name) || [];
+      const available = [...endpointNames, ...templateNames].join(', ') || 'none';
       console.error(`[ERROR] Endpoint "@${endpointName}" not found. Available: ${available}`);
       process.exit(1);
     }
@@ -513,18 +517,19 @@ Examples:
     method = endpoint.method || method;
     finalHeaders = { ...finalHeaders, ...endpoint.headers };
     
-    // Merge default body with provided body
-    if (endpoint.defaultBody) {
+    // Merge default body with provided body (support both 'defaultBody' and 'body')
+    const templateBody = endpoint.defaultBody || endpoint.body;
+    if (templateBody) {
       if (body) {
         try {
           const parsedBody = JSON.parse(body);
-          // Deep merge: provided body overrides defaultBody
-          body = JSON.stringify(deepMerge(endpoint.defaultBody, parsedBody));
+          // Deep merge: provided body overrides templateBody
+          body = JSON.stringify(deepMerge(templateBody, parsedBody));
         } catch {
           // Keep body as-is if not valid JSON
         }
       } else {
-        body = JSON.stringify(endpoint.defaultBody);
+        body = JSON.stringify(templateBody);
       }
     }
   }

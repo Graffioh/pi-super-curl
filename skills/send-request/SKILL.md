@@ -141,6 +141,17 @@ Two syntaxes for different contexts:
 {"type": "basic", "username": "$USER", "password": "$PASS"}
 ```
 
+## Timeout Handling
+
+**Important:** The script has no internal timeout. When using this skill, always set the bash tool `timeout` to **300 seconds** to ensure long-running requests complete:
+
+```bash
+# Always use timeout: 300 for all requests
+node "$SCRIPT" GET "https://api.example.com/health" 2>&1  # timeout: 300
+
+node "$SCRIPT" POST "@chat" --body '{"id": "{{uuidv7}}"}' 2>&1  # timeout: 300
+```
+
 ## Output
 
 The script outputs:
