@@ -11,8 +11,9 @@
  *   /scurl-log - Capture logs after request (requires customLogging config)
  */
 
+import { execSync } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text, Editor, type EditorTheme, Key, matchesKey } from "@mariozechner/pi-tui";
+import { Editor, type EditorTheme, Key, matchesKey } from "@mariozechner/pi-tui";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -98,7 +99,7 @@ interface SuperCurlConfig {
 	envFile?: string;
 	auth?: AuthConfig;
 	headers?: Record<string, string>;
-	endpoints?: any[];
+	endpoints?: unknown[];
 }
 
 // ===== History Types =====
@@ -1166,11 +1167,11 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 				if (fs.existsSync(scriptPath)) {
 					ctx.ui.notify("Processing...", "info");
 					try {
-						const { execSync } = require("child_process");
 						execSync(`"${scriptPath}" "${outputDir}"`, { cwd: ctx.cwd, stdio: "pipe", timeout: 120000 });
 						postScriptResult = "\n  Post-script: ✓ executed";
-					} catch (err: any) {
-						if (err?.status === 2) {
+					} catch (err: unknown) {
+						const status = typeof err === "object" && err !== null && "status" in err ? err.status : undefined;
+						if (status === 2) {
 							ctx.ui.notify("⚠️ Log already processed\n  Run a new /scurl request first.", "warning");
 							return;
 						}
@@ -1186,7 +1187,7 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 					`✓ Logs saved to ${outputDir}\n  Files: ${copiedLogs.join(", ")}` +
 					(missingLogs.length > 0 ? `\n  Missing: ${missingLogs.join(", ")}` : "") +
 					postScriptResult,
-					"success"
+					"info"
 				);
 			} else {
 				ctx.ui.notify(`✗ No logs found\n  Missing: ${missingLogs.join(", ")}`, "error");
@@ -1359,8 +1360,8 @@ export default function superCurlExtension(pi: ExtensionAPI) {
 						const date = new Date(entry.timestamp);
 						const timeStr = date.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" });
 						const dateStr = date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-						const methodColors: Record<string, string> = { GET: "success", POST: "accent", PUT: "warning", PATCH: "warning", DELETE: "error" };
-						const methodStr = theme.fg(methodColors[entry.method] as any || "text", entry.method.padEnd(6));
+						const methodColors: Record<string, "success" | "accent" | "warning" | "error"> = { GET: "success", POST: "accent", PUT: "warning", PATCH: "warning", DELETE: "error" };
+						const methodStr = theme.fg(methodColors[entry.method] ?? "text", entry.method.padEnd(6));
 						const maxUrlLen = innerWidth - 30;
 						const url = entry.template ? `[${entry.template}]` : entry.url;
 						const truncatedUrl = url.length > maxUrlLen ? url.slice(0, maxUrlLen - 3) + "..." : url;
